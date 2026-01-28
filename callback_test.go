@@ -51,6 +51,43 @@ func TestCallGoFromSharedLib(t *testing.T) {
 	}
 }
 
+// TestCallbackStringConversion tests that C char* arguments are correctly
+// converted to Go strings when the callback signature uses string type.
+func TestCallbackStringConversion(t *testing.T) {
+	libFileName := filepath.Join(t.TempDir(), "libcbtest.so")
+	t.Logf("Build %v", libFileName)
+
+	if err := buildSharedLib("CC", libFileName, filepath.Join("testdata", "libcbtest", "callback_test.c")); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(libFileName)
+
+	lib, err := purego.Dlopen(libFileName, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	if err != nil {
+		t.Fatalf("Dlopen(%q) failed: %v", libFileName, err)
+	}
+
+	var callCallback func(p uintptr, s string) int
+	purego.RegisterLibFunc(&callCallback, lib, "callCallback")
+
+	const expected = "a test string"
+	var got string
+	goFunc := func(s string, n int) int {
+		got = s
+		if len(s) != n {
+			t.Errorf("string length mismatch: got %d, want %d", len(s), n)
+		}
+		return 1
+	}
+
+	cb := purego.NewCallback(goFunc)
+	callCallback(cb, expected)
+
+	if got != expected {
+		t.Errorf("string callback got %q, want %q", got, expected)
+	}
+}
+
 func TestNewCallbackFloat64(t *testing.T) {
 	// This tests the maximum number of arguments a function to NewCallback can take
 	const (
