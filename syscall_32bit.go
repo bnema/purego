@@ -17,6 +17,7 @@ const (
 )
 
 type syscall15Args struct {
+	_                                                                                   hostLayout
 	fn, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15                uintptr
 	a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32 uintptr
 	f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16               uintptr
@@ -105,5 +106,25 @@ func SyscallN(fn uintptr, args ...uintptr) (r1, r2, err uintptr) {
 	// add padding so there is no out-of-bounds slicing
 	var tmp [maxArgs]uintptr
 	copy(tmp[:], args)
+	return syscall_syscall15X(fn, tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7], tmp[8], tmp[9], tmp[10], tmp[11], tmp[12], tmp[13], tmp[14])
+}
+
+// SyscallSelf is like SyscallN but efficiently prepends self to args without allocation.
+// It is designed for method-like calls where the first argument is always a receiver pointer.
+// This avoids the heap allocation that would occur with SyscallN(fn, append([]uintptr{self}, args...)...).
+//
+//go:uintptrescapes
+func SyscallSelf(fn, self uintptr, args ...uintptr) (r1, r2, err uintptr) {
+	if fn == 0 {
+		panic("purego: fn is nil")
+	}
+	if len(args) > maxArgs-1 {
+		panic("purego: too many arguments to SyscallSelf")
+	}
+	// Use a stack-allocated array to prepend self without heap allocation.
+	// self goes in tmp[0], remaining args follow.
+	var tmp [maxArgs]uintptr
+	tmp[0] = self
+	copy(tmp[1:], args)
 	return syscall_syscall15X(fn, tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7], tmp[8], tmp[9], tmp[10], tmp[11], tmp[12], tmp[13], tmp[14])
 }

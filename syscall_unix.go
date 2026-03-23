@@ -55,9 +55,10 @@ func NewCallback(fn any) uintptr {
 const maxCB = 2000
 
 var cbs struct {
-	lock  sync.Mutex
-	numFn int                  // the number of functions currently in cbs.funcs
-	funcs [maxCB]reflect.Value // the saved callbacks
+	lock     sync.RWMutex
+	numFn    int                  // the number of functions currently in cbs.funcs
+	funcs    [maxCB]reflect.Value // the saved callbacks
+	argPools [maxCB]*sync.Pool    // pre-allocated argument buffers per callback
 }
 
 func compileCallback(fn any) uintptr {
@@ -103,9 +104,16 @@ output:
 	if cbs.numFn >= maxCB {
 		panic("purego: the maximum number of callbacks has been reached")
 	}
-	cbs.funcs[cbs.numFn] = val
+	index := cbs.numFn
+	cbs.funcs[index] = val
+	numIn := ty.NumIn()
+	cbs.argPools[index] = &sync.Pool{
+		New: func() any {
+			return make([]reflect.Value, numIn)
+		},
+	}
 	cbs.numFn++
-	return callbackasmAddr(cbs.numFn - 1)
+	return callbackasmAddr(index)
 }
 
 const ptrSize = unsafe.Sizeof((*int)(nil))
@@ -127,11 +135,18 @@ var callbackWrap_call = callbackWrap
 // callbackWrap is called by assembly code which determines which Go function to call.
 // This function takes the arguments and passes them to the Go function and returns the result.
 func callbackWrap(a *callbackArgs) {
-	cbs.lock.Lock()
+	cbs.lock.RLock()
 	fn := cbs.funcs[a.index]
-	cbs.lock.Unlock()
+	pool := cbs.argPools[a.index]
+	cbs.lock.RUnlock()
 	fnType := fn.Type()
-	args := make([]reflect.Value, fnType.NumIn())
+	args := pool.Get().([]reflect.Value)
+	defer func() {
+		for i := range args {
+			args[i] = reflect.Value{}
+		}
+		pool.Put(args)
+	}()
 	frame := (*[callbackMaxFrame]uintptr)(a.args)
 	// stackFrame points to stack-passed arguments. On most architectures this is
 	// contiguous with frame (after register args), but on ppc64le it's separate.

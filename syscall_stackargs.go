@@ -17,6 +17,7 @@ import "unsafe"
 // the runtime's own callback mechanism, so this type is compiled but unused,
 // serving only as a stub to satisfy cross-platform compilation.
 type callbackArgs struct {
+	_     hostLayout
 	index uintptr
 	// args points to the argument block.
 	//

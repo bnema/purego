@@ -160,7 +160,7 @@ func RegisterFunc(fptr any, cfn uintptr) {
 				}
 			case reflect.String, reflect.Uintptr, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
 				reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Pointer, reflect.UnsafePointer,
-				reflect.Slice, reflect.Bool:
+				reflect.Slice, reflect.Array, reflect.Bool:
 				if ints < numOfIntegerRegisters() {
 					ints++
 				} else {
@@ -218,6 +218,28 @@ func RegisterFunc(fptr any, cfn uintptr) {
 		}
 	}
 
+	// Task 3: Analyze types at RegisterFunc time to determine if keepAlive is needed.
+	// keepAlive is only used for: string args (CString alloc), struct args (addStruct),
+	// struct returns > maxRegAllocStructSize (hidden pointer), array args (addressable copy),
+	// and variadic []any args (unknown types at registration time).
+	needsKeepAlive := false
+	for i := 0; i < ty.NumIn(); i++ {
+		switch ty.In(i).Kind() {
+		case reflect.String, reflect.Struct, reflect.Array:
+			needsKeepAlive = true
+		case reflect.Interface:
+			// variadic []any — could contain anything
+			needsKeepAlive = true
+		}
+	}
+	if ty.NumOut() == 1 {
+		switch ty.Out(0).Kind() {
+		case reflect.Struct:
+			// struct returns may need hidden pointer allocation stored in keepAlive
+			needsKeepAlive = true
+		}
+	}
+
 	v := reflect.MakeFunc(ty, func(args []reflect.Value) (results []reflect.Value) {
 		var sysargs [maxArgs]uintptr
 		// Use maxArgs instead of numOfFloatRegisters() to keep this code path allocation-free,
@@ -264,132 +286,212 @@ func RegisterFunc(fptr any, cfn uintptr) {
 			addFloat = addStack
 		}
 
-		var keepAlive []any
-		defer func() {
-			runtime.KeepAlive(keepAlive)
-			runtime.KeepAlive(args)
-		}()
+		if needsKeepAlive {
+			// Slow path: allocate keepAlive slice and defer cleanup.
+			// Used when args include strings, structs, arrays, or variadic []any.
+			var keepAlive []any
+			defer func() {
+				runtime.KeepAlive(keepAlive)
+				runtime.KeepAlive(args)
+			}()
 
-		var arm64_r8 uintptr
-		if ty.NumOut() == 1 && ty.Out(0).Kind() == reflect.Struct {
-			outType := ty.Out(0)
-			if (runtime.GOARCH == "amd64" || runtime.GOARCH == "loong64" || runtime.GOARCH == "ppc64le" || runtime.GOARCH == "riscv64" || runtime.GOARCH == "s390x") && outType.Size() > maxRegAllocStructSize {
-				val := reflect.New(outType)
-				keepAlive = append(keepAlive, val)
-				addInt(val.Pointer())
-			} else if runtime.GOARCH == "arm64" && outType.Size() > maxRegAllocStructSize {
-				isAllFloats, numFields := isAllSameFloat(outType)
-				if !isAllFloats || numFields > 4 {
+			var arm64_r8 uintptr
+			if ty.NumOut() == 1 && ty.Out(0).Kind() == reflect.Struct {
+				outType := ty.Out(0)
+				if (runtime.GOARCH == "amd64" || runtime.GOARCH == "loong64" || runtime.GOARCH == "ppc64le" || runtime.GOARCH == "riscv64" || runtime.GOARCH == "s390x") && outType.Size() > maxRegAllocStructSize {
 					val := reflect.New(outType)
 					keepAlive = append(keepAlive, val)
-					arm64_r8 = val.Pointer()
+					addInt(val.Pointer())
+				} else if runtime.GOARCH == "arm64" && outType.Size() > maxRegAllocStructSize {
+					isAllFloats, numFields := isAllSameFloat(outType)
+					if !isAllFloats || numFields > 4 {
+						val := reflect.New(outType)
+						keepAlive = append(keepAlive, val)
+						arm64_r8 = val.Pointer()
+					}
 				}
 			}
+			for i, v := range args {
+				if variadic, ok := xreflect.TypeAssert[[]any](args[i]); ok {
+					if i != len(args)-1 {
+						panic("purego: can only expand last parameter")
+					}
+					for _, x := range variadic {
+						keepAlive = addValue(reflect.ValueOf(x), keepAlive, addInt, addFloat, addStack, &numInts, &numFloats, &numStack)
+					}
+					continue
+				}
+				// Check if we need to start Darwin ARM64 C-style stack packing
+				if runtime.GOARCH == "arm64" && runtime.GOOS == "darwin" && shouldBundleStackArgs(v, numInts, numFloats) {
+					// Collect and separate remaining args into register vs stack
+					stackArgs, newKeepAlive := collectStackArgs(args, i, numInts, numFloats,
+						keepAlive, addInt, addFloat, addStack, &numInts, &numFloats, &numStack)
+					keepAlive = newKeepAlive
+
+					// Bundle stack arguments with C-style packing
+					bundleStackArgs(stackArgs, addStack)
+					break
+				}
+				keepAlive = addValue(v, keepAlive, addInt, addFloat, addStack, &numInts, &numFloats, &numStack)
+			}
+			return callAndReturn(ty, is32bit, cfn, &sysargs, &floats, arm64_r8, args)
 		}
+
+		// Fast path: no keepAlive needed (pointer/integer/bool/float args only).
+		// Skip keepAlive slice allocation and defer overhead.
+		defer runtime.KeepAlive(args)
+
 		for i, v := range args {
 			if variadic, ok := xreflect.TypeAssert[[]any](args[i]); ok {
 				if i != len(args)-1 {
 					panic("purego: can only expand last parameter")
 				}
 				for _, x := range variadic {
-					keepAlive = addValue(reflect.ValueOf(x), keepAlive, addInt, addFloat, addStack, &numInts, &numFloats, &numStack)
+					addValue(reflect.ValueOf(x), nil, addInt, addFloat, addStack, &numInts, &numFloats, &numStack)
 				}
 				continue
 			}
 			// Check if we need to start Darwin ARM64 C-style stack packing
 			if runtime.GOARCH == "arm64" && runtime.GOOS == "darwin" && shouldBundleStackArgs(v, numInts, numFloats) {
-				// Collect and separate remaining args into register vs stack
-				stackArgs, newKeepAlive := collectStackArgs(args, i, numInts, numFloats,
-					keepAlive, addInt, addFloat, addStack, &numInts, &numFloats, &numStack)
-				keepAlive = newKeepAlive
-
-				// Bundle stack arguments with C-style packing
+				stackArgs, _ := collectStackArgs(args, i, numInts, numFloats,
+					nil, addInt, addFloat, addStack, &numInts, &numFloats, &numStack)
 				bundleStackArgs(stackArgs, addStack)
 				break
 			}
-			keepAlive = addValue(v, keepAlive, addInt, addFloat, addStack, &numInts, &numFloats, &numStack)
+			addValue(v, nil, addInt, addFloat, addStack, &numInts, &numFloats, &numStack)
 		}
 
-		syscall := thePool.Get().(*syscall15Args)
-		defer thePool.Put(syscall)
-
-		if runtime.GOARCH == "loong64" || runtime.GOARCH == "ppc64le" || runtime.GOARCH == "riscv64" || runtime.GOARCH == "s390x" {
-			syscall.Set(cfn, sysargs[:], floats[:], 0)
-			runtime_cgocall(syscall15XABI0, unsafe.Pointer(syscall))
-		} else if runtime.GOARCH == "arm64" || runtime.GOOS != "windows" {
-			// Use the normal arm64 calling convention even on Windows
-			syscall.Set(cfn, sysargs[:], floats[:], arm64_r8)
-			runtime_cgocall(syscall15XABI0, unsafe.Pointer(syscall))
-		} else {
-			*syscall = syscall15Args{}
-			// This is a fallback for Windows amd64, 386, and arm. Note this may not support floats
-			syscall.a1, syscall.a2, _ = syscall_syscall15X(cfn, sysargs[0], sysargs[1], sysargs[2], sysargs[3], sysargs[4],
-				sysargs[5], sysargs[6], sysargs[7], sysargs[8], sysargs[9], sysargs[10], sysargs[11],
-				sysargs[12], sysargs[13], sysargs[14])
-			syscall.f1 = syscall.a2 // on amd64 a2 stores the float return. On 32bit platforms floats aren't support
-		}
-		if ty.NumOut() == 0 {
-			return nil
-		}
-		outType := ty.Out(0)
-		v := reflect.New(outType).Elem()
-		switch outType.Kind() {
-		case reflect.Uintptr, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			v.SetUint(uint64(syscall.a1))
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			v.SetInt(int64(syscall.a1))
-		case reflect.Bool:
-			v.SetBool(byte(syscall.a1) != 0)
-		case reflect.UnsafePointer:
-			// We take the address and then dereference it to trick go vet from creating a possible miss-use of unsafe.Pointer
-			v.SetPointer(*(*unsafe.Pointer)(unsafe.Pointer(&syscall.a1)))
-		case reflect.Pointer:
-			v = reflect.NewAt(outType, unsafe.Pointer(&syscall.a1)).Elem()
-		case reflect.Func:
-			// wrap this C function in a nicely typed Go function
-			v = reflect.New(outType)
-			RegisterFunc(v.Interface(), syscall.a1)
-		case reflect.String:
-			v.SetString(strings.GoString(syscall.a1))
-		case reflect.Float32:
-			// NOTE: syscall.r2 is only the floating return value on 64bit platforms.
-			// On 32bit platforms syscall.r2 is the upper part of a 64bit return.
-			// On 386, x87 FPU returns floats as float64 in ST(0), so we read as float64 and convert.
-			// On PPC64LE, C ABI converts float32 to double in FPR, so we read as float64.
-			// On S390X (big-endian), float32 is in upper 32 bits of the 64-bit FP register.
-			switch runtime.GOARCH {
-			case "386":
-				v.SetFloat(math.Float64frombits(uint64(syscall.f1) | (uint64(syscall.f2) << 32)))
-			case "ppc64le":
-				v.SetFloat(math.Float64frombits(uint64(syscall.f1)))
-			case "s390x":
-				// S390X is big-endian: float32 in upper 32 bits of 64-bit register
-				v.SetFloat(float64(math.Float32frombits(uint32(syscall.f1 >> 32))))
-			default:
-				v.SetFloat(float64(math.Float32frombits(uint32(syscall.f1))))
-			}
-		case reflect.Float64:
-			// NOTE: syscall.r2 is only the floating return value on 64bit platforms.
-			// On 32bit platforms syscall.r2 is the upper part of a 64bit return.
-			if is32bit {
-				v.SetFloat(math.Float64frombits(uint64(syscall.f1) | (uint64(syscall.f2) << 32)))
-			} else {
-				v.SetFloat(math.Float64frombits(uint64(syscall.f1)))
-			}
-		case reflect.Struct:
-			v = getStruct(outType, *syscall)
-		default:
-			panic("purego: unsupported return kind: " + outType.Kind().String())
-		}
-		if len(args) > 0 {
-			// reuse args slice instead of allocating one when possible
-			args[0] = v
-			return args[:1]
-		} else {
-			return []reflect.Value{v}
-		}
+		return callAndReturn(ty, is32bit, cfn, &sysargs, &floats, 0, args)
 	})
 	fn.Set(v)
+}
+
+// callAndReturn performs the actual C function call and constructs the return value.
+// It is shared between the fast path (no keepAlive) and slow path (with keepAlive).
+func callAndReturn(ty reflect.Type, is32bit bool, cfn uintptr, sysargs *[maxArgs]uintptr, floats *[maxArgs]uintptr, arm64_r8 uintptr, args []reflect.Value) []reflect.Value {
+	syscall := thePool.Get().(*syscall15Args)
+	defer thePool.Put(syscall)
+
+	if runtime.GOARCH == "loong64" || runtime.GOARCH == "ppc64le" || runtime.GOARCH == "riscv64" || runtime.GOARCH == "s390x" {
+		syscall.Set(cfn, sysargs[:], floats[:], 0)
+		runtime_cgocall(syscall15XABI0, unsafe.Pointer(syscall))
+	} else if runtime.GOARCH == "arm64" || runtime.GOOS != "windows" {
+		// Use the normal arm64 calling convention even on Windows
+		syscall.Set(cfn, sysargs[:], floats[:], arm64_r8)
+		runtime_cgocall(syscall15XABI0, unsafe.Pointer(syscall))
+	} else {
+		*syscall = syscall15Args{}
+		// This is a fallback for Windows amd64, 386, and arm. Note this may not support floats
+		syscall.a1, syscall.a2, _ = syscall_syscall15X(cfn, sysargs[0], sysargs[1], sysargs[2], sysargs[3], sysargs[4],
+			sysargs[5], sysargs[6], sysargs[7], sysargs[8], sysargs[9], sysargs[10], sysargs[11],
+			sysargs[12], sysargs[13], sysargs[14])
+		syscall.f1 = syscall.a2 // on amd64 a2 stores the float return. On 32bit platforms floats aren't support
+	}
+	if ty.NumOut() == 0 {
+		return nil
+	}
+	outType := ty.Out(0)
+	// Task 5: For simple scalar return types, construct the reflect.Value directly
+	// instead of allocating via reflect.New(outType).Elem().
+	// reflect.ValueOf for scalar types avoids the heap allocation that reflect.New incurs.
+	var v reflect.Value
+	switch outType.Kind() {
+	case reflect.Uintptr:
+		v = reflect.ValueOf(uintptr(syscall.a1))
+	case reflect.Uint:
+		v = reflect.ValueOf(uint(syscall.a1))
+	case reflect.Uint8:
+		v = reflect.ValueOf(uint8(syscall.a1))
+	case reflect.Uint16:
+		v = reflect.ValueOf(uint16(syscall.a1))
+	case reflect.Uint32:
+		v = reflect.ValueOf(uint32(syscall.a1))
+	case reflect.Uint64:
+		v = reflect.ValueOf(uint64(syscall.a1))
+	case reflect.Int:
+		v = reflect.ValueOf(int(syscall.a1))
+	case reflect.Int8:
+		v = reflect.ValueOf(int8(syscall.a1))
+	case reflect.Int16:
+		v = reflect.ValueOf(int16(syscall.a1))
+	case reflect.Int32:
+		v = reflect.ValueOf(int32(syscall.a1))
+	case reflect.Int64:
+		v = reflect.ValueOf(int64(syscall.a1))
+	case reflect.Bool:
+		v = reflect.ValueOf(byte(syscall.a1) != 0)
+	case reflect.UnsafePointer:
+		// We take the address and then dereference it to trick go vet from creating a possible miss-use of unsafe.Pointer
+		v = reflect.New(outType).Elem()
+		v.SetPointer(*(*unsafe.Pointer)(unsafe.Pointer(&syscall.a1)))
+	case reflect.Pointer:
+		v = reflect.NewAt(outType, unsafe.Pointer(&syscall.a1)).Elem()
+	case reflect.Func:
+		// wrap this C function in a nicely typed Go function
+		v = reflect.New(outType)
+		RegisterFunc(v.Interface(), syscall.a1)
+	case reflect.String:
+		v = reflect.ValueOf(strings.GoString(syscall.a1))
+	case reflect.Float32:
+		// NOTE: syscall.r2 is only the floating return value on 64bit platforms.
+		// On 32bit platforms syscall.r2 is the upper part of a 64bit return.
+		// On 386, x87 FPU returns floats as float64 in ST(0), so we read as float64 and convert.
+		// On PPC64LE, C ABI converts float32 to double in FPR, so we read as float64.
+		// On S390X (big-endian), float32 is in upper 32 bits of the 64-bit FP register.
+		v = reflect.New(outType).Elem()
+		switch runtime.GOARCH {
+		case "386":
+			v.SetFloat(math.Float64frombits(uint64(syscall.f1) | (uint64(syscall.f2) << 32)))
+		case "ppc64le":
+			v.SetFloat(math.Float64frombits(uint64(syscall.f1)))
+		case "s390x":
+			// S390X is big-endian: float32 in upper 32 bits of 64-bit register
+			v.SetFloat(float64(math.Float32frombits(uint32(syscall.f1 >> 32))))
+		default:
+			v.SetFloat(float64(math.Float32frombits(uint32(syscall.f1))))
+		}
+	case reflect.Float64:
+		// NOTE: syscall.r2 is only the floating return value on 64bit platforms.
+		// On 32bit platforms syscall.r2 is the upper part of a 64bit return.
+		v = reflect.New(outType).Elem()
+		if is32bit {
+			v.SetFloat(math.Float64frombits(uint64(syscall.f1) | (uint64(syscall.f2) << 32)))
+		} else {
+			v.SetFloat(math.Float64frombits(uint64(syscall.f1)))
+		}
+	case reflect.Struct:
+		v = getStruct(outType, *syscall)
+	case reflect.Slice:
+		if outType.Elem().Kind() == reflect.String {
+			// C returns char** (NULL-terminated array of strings)
+			if syscall.a1 == 0 {
+				v = reflect.Zero(outType)
+			} else {
+				var result []string
+				ptr := syscall.a1
+				for {
+					strPtr := *(*uintptr)(unsafe.Pointer(ptr))
+					if strPtr == 0 {
+						break
+					}
+					result = append(result, strings.GoString(strPtr))
+					ptr += unsafe.Sizeof(uintptr(0))
+				}
+				v = reflect.ValueOf(result)
+			}
+		} else {
+			panic("purego: unsupported return slice element kind: " + outType.Elem().Kind().String())
+		}
+	default:
+		panic("purego: unsupported return kind: " + outType.Kind().String())
+	}
+	if len(args) > 0 {
+		// reuse args slice instead of allocating one when possible
+		args[0] = v
+		return args[:1]
+	} else {
+		return []reflect.Value{v}
+	}
 }
 
 func addValue(v reflect.Value, keepAlive []any, addInt func(x uintptr), addFloat func(x uintptr), addStack func(x uintptr), numInts *int, numFloats *int, numStack *int) []any {
@@ -403,9 +505,27 @@ func addValue(v reflect.Value, keepAlive []any, addInt func(x uintptr), addFloat
 		addInt(uintptr(v.Uint()))
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		addInt(uintptr(v.Int()))
-	case reflect.Pointer, reflect.UnsafePointer, reflect.Slice:
+	case reflect.Pointer, reflect.UnsafePointer:
 		// There is no need to keepAlive this pointer separately because it is kept alive in the args variable
 		addInt(v.Pointer())
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.String {
+			ss := v.Interface().([]string)
+			if ss == nil {
+				addInt(0)
+			} else {
+				res := make([]*byte, len(ss)+1)
+				for i, s := range ss {
+					res[i] = strings.CString(s)
+				}
+				// NULL-terminated for C
+				res[len(ss)] = nil
+				keepAlive = append(keepAlive, res)
+				addInt(uintptr(unsafe.Pointer(&res[0])))
+			}
+		} else {
+			addInt(v.Pointer())
+		}
 	case reflect.Func:
 		addInt(NewCallback(v.Interface()))
 	case reflect.Bool:
@@ -428,6 +548,17 @@ func addValue(v reflect.Value, keepAlive []any, addInt func(x uintptr), addFloat
 			addFloat(uintptr(bits >> 32))
 		} else {
 			addFloat(uintptr(math.Float64bits(v.Float())))
+		}
+	case reflect.Array:
+		// Task 7: Support fixed-size array arguments by passing a pointer to the array data.
+		if v.CanAddr() {
+			addInt(v.Addr().Pointer())
+		} else {
+			// Array is not addressable (e.g. passed by value); make an addressable copy.
+			tmp := reflect.New(v.Type()).Elem()
+			tmp.Set(v)
+			keepAlive = append(keepAlive, tmp)
+			addInt(tmp.Addr().Pointer())
 		}
 	case reflect.Struct:
 		keepAlive = addStruct(v, numInts, numFloats, numStack, addInt, addFloat, addStack, keepAlive)
