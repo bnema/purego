@@ -392,35 +392,14 @@ func callAndReturn(ty reflect.Type, is32bit bool, cfn uintptr, sysargs *[maxArgs
 		return nil
 	}
 	outType := ty.Out(0)
-	// Task 5: For simple scalar return types, construct the reflect.Value directly
-	// instead of allocating via reflect.New(outType).Elem().
-	// reflect.ValueOf for scalar types avoids the heap allocation that reflect.New incurs.
-	var v reflect.Value
+	v := reflect.New(outType).Elem()
 	switch outType.Kind() {
-	case reflect.Uintptr:
-		v = reflect.ValueOf(uintptr(syscall.a1))
-	case reflect.Uint:
-		v = reflect.ValueOf(uint(syscall.a1))
-	case reflect.Uint8:
-		v = reflect.ValueOf(uint8(syscall.a1))
-	case reflect.Uint16:
-		v = reflect.ValueOf(uint16(syscall.a1))
-	case reflect.Uint32:
-		v = reflect.ValueOf(uint32(syscall.a1))
-	case reflect.Uint64:
-		v = reflect.ValueOf(uint64(syscall.a1))
-	case reflect.Int:
-		v = reflect.ValueOf(int(syscall.a1))
-	case reflect.Int8:
-		v = reflect.ValueOf(int8(syscall.a1))
-	case reflect.Int16:
-		v = reflect.ValueOf(int16(syscall.a1))
-	case reflect.Int32:
-		v = reflect.ValueOf(int32(syscall.a1))
-	case reflect.Int64:
-		v = reflect.ValueOf(int64(syscall.a1))
+	case reflect.Uintptr, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(uint64(syscall.a1))
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(int64(syscall.a1))
 	case reflect.Bool:
-		v = reflect.ValueOf(byte(syscall.a1) != 0)
+		v.SetBool(byte(syscall.a1) != 0)
 	case reflect.UnsafePointer:
 		// We take the address and then dereference it to trick go vet from creating a possible miss-use of unsafe.Pointer
 		v = reflect.New(outType).Elem()
