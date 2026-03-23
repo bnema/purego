@@ -224,11 +224,12 @@ func RegisterFunc(fptr any, cfn uintptr) {
 	// and variadic []any args (unknown types at registration time).
 	needsKeepAlive := false
 	for i := 0; i < ty.NumIn(); i++ {
-		switch ty.In(i).Kind() {
-		case reflect.String, reflect.Struct, reflect.Array:
+		inKind := ty.In(i).Kind()
+		switch inKind {
+		case reflect.String, reflect.Struct, reflect.Array, reflect.Slice:
+			// Slice covers []string (CString allocs) and variadic ...any ([]any)
 			needsKeepAlive = true
 		case reflect.Interface:
-			// variadic []any — could contain anything
 			needsKeepAlive = true
 		}
 	}
@@ -312,7 +313,7 @@ func RegisterFunc(fptr any, cfn uintptr) {
 				}
 			}
 			for i, v := range args {
-				if variadic, ok := xreflect.TypeAssert[[]any](args[i]); ok {
+				if variadic, ok := xreflect.TypeAssert[[]any](v); ok {
 					if i != len(args)-1 {
 						panic("purego: can only expand last parameter")
 					}
@@ -342,7 +343,7 @@ func RegisterFunc(fptr any, cfn uintptr) {
 		defer runtime.KeepAlive(args)
 
 		for i, v := range args {
-			if variadic, ok := xreflect.TypeAssert[[]any](args[i]); ok {
+			if variadic, ok := xreflect.TypeAssert[[]any](v); ok {
 				if i != len(args)-1 {
 					panic("purego: can only expand last parameter")
 				}
@@ -516,7 +517,9 @@ func addValue(v reflect.Value, keepAlive []any, addInt func(x uintptr), addFloat
 			} else {
 				res := make([]*byte, len(ss)+1)
 				for i, s := range ss {
-					res[i] = strings.CString(s)
+					ptr := strings.CString(s)
+					keepAlive = append(keepAlive, ptr)
+					res[i] = ptr
 				}
 				// NULL-terminated for C
 				res[len(ss)] = nil
