@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Ebitengine Authors
+
 package purego
 
 import (
@@ -38,6 +41,22 @@ func TestFlushPackedWordResetsState(t *testing.T) {
 	}
 }
 
+func TestFlushPackedWordResetsStateForIntegerBranch(t *testing.T) {
+	var val uint64 = 0x55667788
+	shift := byte(16)
+	flushed := false
+	var gotInt uintptr
+	flushPackedWord(&val, &shift, &flushed, false, func(uintptr) {
+		t.Fatal("unexpected float flush")
+	}, func(v uintptr) { gotInt = v })
+	if !flushed || val != 0 || shift != 0 {
+		t.Fatalf("flushPackedWord() left state dirty: flushed=%v val=%#x shift=%d", flushed, val, shift)
+	}
+	if gotInt != 0x55667788 {
+		t.Fatalf("flushPackedWord() flushed %#x, want %#x", gotInt, uintptr(0x55667788))
+	}
+}
+
 func TestStableValuePointerCopiesUnaddressableValue(t *testing.T) {
 	type sample struct{ X uint32 }
 	ptr, keepAlive := stableValuePointer(reflect.ValueOf(sample{X: 7}))
@@ -46,6 +65,18 @@ func TestStableValuePointerCopiesUnaddressableValue(t *testing.T) {
 	}
 	if got := *(*uint32)(ptr); got != 7 {
 		t.Fatalf("stableValuePointer() copied %#x, want %#x", got, uint32(7))
+	}
+}
+
+func TestStableValuePointerUsesAddressableValue(t *testing.T) {
+	type sample struct{ X uint32 }
+	value := sample{X: 9}
+	ptr, keepAlive := stableValuePointer(reflect.ValueOf(&value).Elem())
+	if keepAlive != nil {
+		t.Fatal("expected nil keepAlive for addressable value")
+	}
+	if got := *(*uint32)(ptr); got != 9 {
+		t.Fatalf("stableValuePointer() pointed to %#x, want %#x", got, uint32(9))
 	}
 }
 

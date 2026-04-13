@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 The Ebitengine Authors
+
 package purego
 
 import (
@@ -7,11 +10,11 @@ import (
 )
 
 func packFloat32Pair(low, high uintptr) uintptr {
-	return high<<32 | (low & math.MaxUint32)
+	return uintptr((uint64(high) << 32) | (uint64(low) & math.MaxUint32))
 }
 
 func highFloat32Bits(word uintptr) uint32 {
-	return uint32(word >> 32)
+	return uint32(uint64(word) >> 32)
 }
 
 func flushPackedWord(val *uint64, shift *byte, flushed *bool, isFloat bool, addFloat, addInt func(uintptr)) {
