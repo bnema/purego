@@ -448,14 +448,14 @@ func callAndReturn(ty reflect.Type, is32bit bool, cfn uintptr, sysargs *[maxArgs
 				v = reflect.Zero(outType)
 			} else {
 				var result []string
-				ptr := syscall.a1
+				p := *(*unsafe.Pointer)(unsafe.Pointer(&syscall.a1))
 				for {
-					strPtr := *(*uintptr)(unsafe.Pointer(ptr))
+					strPtr := *(*uintptr)(p)
 					if strPtr == 0 {
 						break
 					}
 					result = append(result, strings.GoString(strPtr))
-					ptr += unsafe.Sizeof(uintptr(0))
+					p = unsafe.Add(p, unsafe.Sizeof(uintptr(0)))
 				}
 				v = reflect.ValueOf(result)
 			}
