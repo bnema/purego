@@ -5,6 +5,7 @@ package purego
 
 import (
 	"reflect"
+	"runtime"
 	"unsafe"
 )
 
@@ -16,8 +17,10 @@ func addStruct(v reflect.Value, numInts, numFloats, numStack *int, addInt, addFl
 
 	// TODO: ARM EABI: small structs are passed in registers or on stack
 	// For simplicity, pass by pointer for now
-	ptr := v.Addr().UnsafePointer()
-	keepAlive = append(keepAlive, ptr)
+	ptr, live := stableValuePointer(v)
+	if live != nil {
+		keepAlive = append(keepAlive, live)
+	}
 	if *numInts < 4 {
 		addInt(uintptr(ptr))
 		*numInts++
@@ -25,6 +28,7 @@ func addStruct(v reflect.Value, numInts, numFloats, numStack *int, addInt, addFl
 		addStack(uintptr(ptr))
 		*numStack++
 	}
+	runtime.KeepAlive(live)
 	return keepAlive
 }
 
@@ -52,13 +56,14 @@ func placeRegisters(v reflect.Value, addFloat func(uintptr), addInt func(uintptr
 	if size == 0 {
 		return
 	}
-	ptr := unsafe.Pointer(v.UnsafeAddr())
+	ptr, live := stableValuePointer(v)
 	if size <= 4 {
 		addInt(*(*uintptr)(ptr))
 	} else if size <= 8 {
 		addInt(*(*uintptr)(ptr))
 		addInt(*(*uintptr)(unsafe.Add(ptr, 4)))
 	}
+	runtime.KeepAlive(live)
 }
 
 // shouldBundleStackArgs always returns false on arm

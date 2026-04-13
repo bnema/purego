@@ -23,35 +23,30 @@ func getStruct(outType reflect.Type, syscall syscall15Args) (v reflect.Value) {
 		// up to 8 bytes is returned in RAX
 		return reflect.NewAt(outType, unsafe.Pointer(&struct{ a uintptr }{syscall.a1})).Elem()
 	case outSize <= 16:
-		r1, r2 := syscall.a1, syscall.a2
-		if isAllFloats(outType) {
-			r1 = syscall.f1
-			r2 = syscall.f2
-		} else {
-			// check first 8 bytes if it's floats
-			hasFirstFloat := false
-			f1 := outType.Field(0).Type
-			if f1.Kind() == reflect.Float64 || f1.Kind() == reflect.Float32 && outType.Field(1).Type.Kind() == reflect.Float32 {
-				r1 = syscall.f1
-				hasFirstFloat = true
-			}
-
-			// find index of the field that starts the second 8 bytes
-			var i int
-			for i = 0; i < outType.NumField(); i++ {
-				if outType.Field(i).Offset == 8 {
-					break
+		var r1, r2 uintptr
+		var intRegs, floatRegs int
+		for i := 0; i < int((outSize+7)/8); i++ {
+			class := classifyEightbyte(outType, uintptr(i)*8, uintptr(i)*8+8)
+			var reg uintptr
+			if class == _SSE {
+				if floatRegs == 0 {
+					reg = syscall.f1
+				} else {
+					reg = syscall.f2
 				}
+				floatRegs++
+			} else {
+				if intRegs == 0 {
+					reg = syscall.a1
+				} else {
+					reg = syscall.a2
+				}
+				intRegs++
 			}
-
-			// check last 8 bytes if they are floats
-			f1 = outType.Field(i).Type
-			if f1.Kind() == reflect.Float64 || f1.Kind() == reflect.Float32 && i+1 == outType.NumField() {
-				r2 = syscall.f1
-			} else if hasFirstFloat {
-				// if the first field was a float then that means the second integer field
-				// comes from the first integer register
-				r2 = syscall.a1
+			if i == 0 {
+				r1 = reg
+			} else {
+				r2 = reg
 			}
 		}
 		return reflect.NewAt(outType, unsafe.Pointer(&struct{ a, b uintptr }{r1, r2})).Elem()
