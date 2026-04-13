@@ -13,7 +13,7 @@ package purego
 type CDecl struct{}
 
 const (
-	maxArgs = 32
+	maxArgs = 15
 )
 
 type syscall15Args struct {
@@ -78,8 +78,8 @@ func (s *syscall15Args) Set(fn uintptr, ints []uintptr, floats []uintptr, r8 uin
 }
 
 // SyscallN takes fn, a C function pointer and a list of arguments as uintptr.
-// There is an internal maximum number of arguments that SyscallN can take. It panics
-// when the maximum is exceeded. It returns the result and the libc error code if there is one.
+// On 386 and arm, SyscallN supports at most 15 uintptr arguments. It panics when
+// the maximum is exceeded. It returns the result and the libc error code if there is one.
 //
 // In order to call this function properly make sure to follow all the rules specified in [unsafe.Pointer]
 // especially point 4.
@@ -111,7 +111,9 @@ func SyscallN(fn uintptr, args ...uintptr) (r1, r2, err uintptr) {
 
 // SyscallSelf is like SyscallN but efficiently prepends self to args without allocation.
 // It is designed for method-like calls where the first argument is always a receiver pointer.
-// This avoids the heap allocation that would occur with SyscallN(fn, append([]uintptr{self}, args...)...).
+// It shares SyscallN's argument-placement limits, and the total count including self is
+// limited to 15 on 386 and arm. This avoids the heap allocation that would occur with
+// SyscallN(fn, append([]uintptr{self}, args...)...).
 //
 //go:uintptrescapes
 func SyscallSelf(fn, self uintptr, args ...uintptr) (r1, r2, err uintptr) {
