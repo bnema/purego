@@ -52,13 +52,15 @@ func (s *syscall15Args) Set(fn uintptr, ints []uintptr, floats []uintptr, r8 uin
 }
 
 // SyscallN takes fn, a C function pointer and a list of arguments as uintptr.
-// There is an internal maximum number of arguments that SyscallN can take. It panics
-// when the maximum is exceeded. It returns the result and the libc error code if there is one.
+// There is an internal maximum number of arguments that SyscallN can take.
+// On 386 and arm, SyscallN supports at most 15 uintptr arguments.
+// It panics when the maximum is exceeded. It returns the result and the libc error code if there is one.
 //
 // In order to call this function properly make sure to follow all the rules specified in [unsafe.Pointer]
 // especially point 4.
 //
 // NOTE: SyscallN does not properly call functions that have both integer and float parameters.
+// Use RegisterFunc instead when the target function mixes integer and floating-point arguments.
 // See discussion comment https://github.com/ebiten/purego/pull/1#issuecomment-1128057607
 // for an explanation of why that is.
 //
@@ -85,6 +87,8 @@ func SyscallN(fn uintptr, args ...uintptr) (r1, r2, err uintptr) {
 
 // SyscallSelf is like SyscallN but efficiently prepends self to args without allocation.
 // It is designed for method-like calls where the first argument is always a receiver pointer.
+// It shares SyscallN's argument-placement limits and mixed integer/float restriction.
+// On 386 and arm, the total count including self is limited to 15 uintptr arguments.
 // This avoids the heap allocation that would occur with SyscallN(fn, append([]uintptr{self}, args...)...).
 //
 //go:uintptrescapes

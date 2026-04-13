@@ -31,7 +31,7 @@ func getStruct(outType reflect.Type, syscall syscall15Args) reflect.Value {
 				// float32 values in FP regs
 				f := []uintptr{syscall.f1, syscall.f2, syscall.f3, syscall.f4}
 				for i := 0; i < numFields; i++ {
-					*(*uint32)(unsafe.Pointer(&buf[i*4])) = uint32(f[i])
+					*(*uint32)(unsafe.Pointer(&buf[i*4])) = highFloat32Bits(f[i])
 				}
 			} else {
 				// float64: whole register value is valid
