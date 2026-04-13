@@ -19,7 +19,7 @@ func getStruct(outType reflect.Type, syscall syscall15Args) (v reflect.Value) {
 		if isAllFloats, numFields := isAllSameFloat(outType); isAllFloats {
 			r1 = syscall.f1
 			if numFields == 2 {
-				r1 = syscall.f2<<32 | syscall.f1
+				r1 = packFloat32Pair(syscall.f1, syscall.f2)
 			}
 		}
 		return reflect.NewAt(outType, unsafe.Pointer(&struct{ a uintptr }{r1})).Elem()
@@ -28,10 +28,10 @@ func getStruct(outType reflect.Type, syscall syscall15Args) (v reflect.Value) {
 		if isAllFloats, numFields := isAllSameFloat(outType); isAllFloats {
 			switch numFields {
 			case 4:
-				r1 = syscall.f2<<32 | syscall.f1
-				r2 = syscall.f4<<32 | syscall.f3
+				r1 = packFloat32Pair(syscall.f1, syscall.f2)
+				r2 = packFloat32Pair(syscall.f3, syscall.f4)
 			case 3:
-				r1 = syscall.f2<<32 | syscall.f1
+				r1 = packFloat32Pair(syscall.f1, syscall.f2)
 				r2 = syscall.f3
 			case 2:
 				r1 = syscall.f1
@@ -91,13 +91,8 @@ func placeRegisters(v reflect.Value, addFloat func(uintptr), addInt func(uintptr
 			align := byte(f.Type().Align()*8 - 1)
 			shift = (shift + align) &^ align
 			if shift >= 64 {
-				shift = 0
-				flushed = true
-				if class == _FLOAT {
-					addFloat(uintptr(val))
-				} else {
-					addInt(uintptr(val))
-				}
+				flushPackedWord(&val, &shift, &flushed, class == _FLOAT, addFloat, addInt)
+				class = _NO_CLASS
 			}
 			switch f.Type().Kind() {
 			case reflect.Struct:
