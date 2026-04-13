@@ -230,7 +230,7 @@ func placeStack(v reflect.Value, keepAlive []any, addInt func(uintptr)) []any {
 // [Arm64 Calling Convention]: https://github.com/ARM-software/abi-aa/blob/main/sysvabi64/sysvabi64.rst
 func isHFA(t reflect.Type) bool {
 	structSize := roundUpTo8(t.Size())
-	if structSize == 0 || t.NumField() > 4 {
+	if structSize == 0 {
 		return false
 	}
 	var kind reflect.Kind
@@ -252,6 +252,20 @@ func isHFA(t reflect.Type) bool {
 				}
 			case reflect.Struct:
 				if !walk(ft) {
+					return false
+				}
+			case reflect.Array:
+				elemKind := ft.Elem().Kind()
+				if elemKind != reflect.Float32 && elemKind != reflect.Float64 {
+					return false
+				}
+				if kind == 0 {
+					kind = elemKind
+				} else if elemKind != kind {
+					return false
+				}
+				members += ft.Len()
+				if members > 4 {
 					return false
 				}
 			default:

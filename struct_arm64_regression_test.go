@@ -28,3 +28,10 @@ func TestIsHFAAcceptsNestedFloatStructs(t *testing.T) {
 		t.Fatal("expected nested float-only struct to be HFA")
 	}
 }
+
+func TestIsHFAAcceptsFloatArrayStruct(t *testing.T) {
+	type arrayed struct{ A [2]float64 }
+	if !isHFA(reflect.TypeOf(arrayed{})) {
+		t.Fatal("expected float array struct to be HFA")
+	}
+}
