@@ -57,7 +57,7 @@ func TestCallbackStringConversion(t *testing.T) {
 	libFileName := filepath.Join(t.TempDir(), "libcbtest.so")
 	t.Logf("Build %v", libFileName)
 
-	if err := buildSharedLib("CC", libFileName, filepath.Join("testdata", "libcbtest", "callback_test.c")); err != nil {
+	if err := buildSharedLib(t, "CC", libFileName, filepath.Join("testdata", "libcbtest", "callback_test.c")); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(libFileName)
