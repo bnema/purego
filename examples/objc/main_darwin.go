@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/ebitengine/purego/objc"
+	"github.com/bnema/purego/objc"
 )
 
 var (

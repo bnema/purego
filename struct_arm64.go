@@ -11,7 +11,7 @@ import (
 	stdstrings "strings"
 	"unsafe"
 
-	"github.com/ebitengine/purego/internal/strings"
+	"github.com/bnema/purego/internal/strings"
 )
 
 func getStruct(outType reflect.Type, syscall syscall15Args) (v reflect.Value) {

@@ -66,8 +66,8 @@ jobs:
           # Check cross-compiling FreeBSD binaries.
           # gcflags -std is necessary to make fakecgo the Cgo for
           # FreeBSD to add the symbols that libc.so depends on.
-          env GOOS=freebsd GOARCH=amd64 go build -gcflags="github.com/ebitengine/purego/internal/fakecgo=-std" -v ./...
-          env GOOS=freebsd GOARCH=arm64 go build -gcflags="github.com/ebitengine/purego/internal/fakecgo=-std" -v ./...          
+          env GOOS=freebsd GOARCH=amd64 go build -gcflags="github.com/bnema/purego/internal/fakecgo=-std" -v ./...
+          env GOOS=freebsd GOARCH=arm64 go build -gcflags="github.com/bnema/purego/internal/fakecgo=-std" -v ./...          
           
           # Check cross-compiling NetBSD binaries.
           env GOOS=netbsd GOARCH=amd64 go build -v ./...
@@ -97,10 +97,10 @@ jobs:
           go mod init foo
           echo 'package main' > main.go
           echo 'import (' >> main.go
-          echo '  _ "github.com/ebitengine/purego"' >> main.go
+          echo '  _ "github.com/bnema/purego"' >> main.go
           echo ')' >> main.go
           echo 'func main() {}' >> main.go
-          go mod edit -replace github.com/ebitengine/purego=$GITHUB_WORKSPACE
+          go mod edit -replace github.com/bnema/purego=$GITHUB_WORKSPACE
           go mod tidy
           go mod vendor
           go build -v .

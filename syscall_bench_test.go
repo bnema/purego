@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ebitengine/purego"
-	"github.com/ebitengine/purego/internal/load"
+	"github.com/bnema/purego"
+	"github.com/bnema/purego/internal/load"
 )
 
 // BenchmarkCallingMethods compares RegisterFunc, SyscallN, and Callback methods

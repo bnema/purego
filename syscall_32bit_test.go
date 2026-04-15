@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ebitengine/purego"
+	"github.com/bnema/purego"
 )
 
 func TestSyscallN32BitPanicsAt16Args(t *testing.T) {
