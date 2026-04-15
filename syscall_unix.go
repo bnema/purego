@@ -7,6 +7,7 @@
 package purego
 
 import (
+	"errors"
 	"reflect"
 	"runtime"
 	"sync"
@@ -52,15 +53,101 @@ func NewCallback(fn any) uintptr {
 	return compileCallback(fn)
 }
 
+// NewCallbackFnPtr converts a Go function pointer to a function pointer conforming to the C calling convention.
+// Calling this function multiple times with the same function pointer returns the original callback address.
+func NewCallbackFnPtr(fnPtr any) uintptr {
+	val := reflect.ValueOf(fnPtr)
+	if val.IsNil() {
+		panic("purego: function must not be nil")
+	}
+	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Func {
+		panic("purego: the type must be a function pointer but was not")
+	}
+	if addr, ok := getCallbackByFnPtr(val); ok {
+		return addr
+	}
+	addr := compileCallback(val.Elem().Interface())
+	cbs.lock.Lock()
+	cbs.knownFnPtr[val.Pointer()] = addr
+	if idx, ok := cbs.knownIdx[addr]; ok {
+		cbs.fnPtrKeys[idx] = val.Pointer()
+	}
+	cbs.lock.Unlock()
+	return addr
+}
+
+// UnrefCallback unreferences a callback created by NewCallback or NewCallbackFnPtr and frees its slot.
+func UnrefCallback(cb uintptr) error {
+	cbs.lock.Lock()
+	defer cbs.lock.Unlock()
+	idx, ok := cbs.knownIdx[cb]
+	if !ok {
+		return errors.New("callback not found")
+	}
+	if key := cbs.fnPtrKeys[idx]; key != 0 {
+		delete(cbs.knownFnPtr, key)
+		cbs.fnPtrKeys[idx] = 0
+	}
+	delete(cbs.knownIdx, cb)
+	cbs.holes[idx] = struct{}{}
+	cbs.funcs[idx] = reflect.Value{}
+	cbs.argPools[idx] = nil
+	return nil
+}
+
+// UnrefCallbackFnPtr unreferences a callback previously created via NewCallbackFnPtr.
+func UnrefCallbackFnPtr(fnPtr any) error {
+	val := reflect.ValueOf(fnPtr)
+	if val.IsNil() {
+		panic("purego: function must not be nil")
+	}
+	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Func {
+		panic("purego: the type must be a function pointer but was not")
+	}
+	cbs.lock.Lock()
+	defer cbs.lock.Unlock()
+	addr, ok := cbs.knownFnPtr[val.Pointer()]
+	if !ok {
+		return errors.New("callback not found")
+	}
+	idx, ok := cbs.knownIdx[addr]
+	if !ok {
+		delete(cbs.knownFnPtr, val.Pointer())
+		return errors.New("callback not found")
+	}
+	delete(cbs.knownFnPtr, val.Pointer())
+	delete(cbs.knownIdx, addr)
+	cbs.fnPtrKeys[idx] = 0
+	cbs.holes[idx] = struct{}{}
+	cbs.funcs[idx] = reflect.Value{}
+	cbs.argPools[idx] = nil
+	return nil
+}
+
 // maxCb is the maximum number of callbacks
 // only increase this if you have added more to the callbackasm function
 const maxCB = 2000
 
-var cbs struct {
-	lock     sync.RWMutex
-	numFn    int                  // the number of functions currently in cbs.funcs
-	funcs    [maxCB]reflect.Value // the saved callbacks
-	argPools [maxCB]*sync.Pool    // pre-allocated argument buffers per callback
+var cbs = struct {
+	lock       sync.RWMutex
+	numFn      int                  // the highest allocated callback index + 1
+	holes      map[int]struct{}     // reusable callback slots
+	funcs      [maxCB]reflect.Value // the saved callbacks
+	argPools   [maxCB]*sync.Pool    // pre-allocated argument buffers per callback
+	knownIdx   map[uintptr]int      // callback address -> slot index
+	knownFnPtr map[uintptr]uintptr  // function pointer variable address -> callback address
+	fnPtrKeys  [maxCB]uintptr       // slot index -> function pointer variable address
+}{
+	holes:      make(map[int]struct{}),
+	knownIdx:   make(map[uintptr]int, maxCB),
+	knownFnPtr: make(map[uintptr]uintptr, maxCB),
+}
+
+func getCallbackByFnPtr(val reflect.Value) (uintptr, bool) {
+	cbs.lock.RLock()
+	defer cbs.lock.RUnlock()
+	addr, ok := cbs.knownFnPtr[val.Pointer()]
+	return addr, ok
 }
 
 func compileCallback(fn any) uintptr {
@@ -103,10 +190,19 @@ output:
 	}
 	cbs.lock.Lock()
 	defer cbs.lock.Unlock()
-	if cbs.numFn >= maxCB {
-		panic("purego: the maximum number of callbacks has been reached")
+	index := -1
+	for i := range cbs.holes {
+		index = i
+		delete(cbs.holes, i)
+		break
 	}
-	index := cbs.numFn
+	if index < 0 {
+		if cbs.numFn >= maxCB {
+			panic("purego: the maximum number of callbacks has been reached")
+		}
+		index = cbs.numFn
+		cbs.numFn++
+	}
 	cbs.funcs[index] = val
 	numIn := ty.NumIn()
 	cbs.argPools[index] = &sync.Pool{
@@ -114,8 +210,9 @@ output:
 			return make([]reflect.Value, numIn)
 		},
 	}
-	cbs.numFn++
-	return callbackasmAddr(index)
+	addr := callbackasmAddr(index)
+	cbs.knownIdx[addr] = index
+	return addr
 }
 
 const ptrSize = unsafe.Sizeof((*int)(nil))

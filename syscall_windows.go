@@ -4,7 +4,9 @@
 package purego
 
 import (
+	"errors"
 	"reflect"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -40,6 +42,62 @@ func NewCallback(fn any) uintptr {
 		return syscall.NewCallbackCDecl(fn)
 	}
 	return syscall.NewCallback(fn)
+}
+
+// NewCallbackFnPtr converts a Go function pointer to a Windows callback and reuses an existing callback when possible.
+func NewCallbackFnPtr(fnPtr any) uintptr {
+	val := reflect.ValueOf(fnPtr)
+	if val.IsNil() {
+		panic("purego: function must not be nil")
+	}
+	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Func {
+		panic("purego: the type must be a function pointer but was not")
+	}
+	if addr, ok := getCallbackByFnPtr(val); ok {
+		return addr
+	}
+	addr := NewCallback(val.Elem().Interface())
+	cbs.lock.Lock()
+	cbs.knownFnPtr[val.Pointer()] = addr
+	cbs.lock.Unlock()
+	return addr
+}
+
+// UnrefCallback is unsupported on Windows because runtime callback slots cannot be reclaimed.
+func UnrefCallback(cb uintptr) error {
+	if cb == 0 {
+		return errors.New("callback not found")
+	}
+	return errors.New("purego: unreferencing callbacks is unsupported on windows")
+}
+
+// UnrefCallbackFnPtr is unsupported on Windows because runtime callback slots cannot be reclaimed.
+func UnrefCallbackFnPtr(fnPtr any) error {
+	val := reflect.ValueOf(fnPtr)
+	if val.IsNil() {
+		panic("purego: function must not be nil")
+	}
+	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Func {
+		panic("purego: the type must be a function pointer but was not")
+	}
+	return errors.New("purego: unreferencing callbacks is unsupported on windows")
+}
+
+// maxCb is the maximum number of tracked Windows callback function pointers.
+const maxCB = 1024
+
+var cbs = struct {
+	lock       sync.RWMutex
+	knownFnPtr map[uintptr]uintptr
+}{
+	knownFnPtr: make(map[uintptr]uintptr, maxCB),
+}
+
+func getCallbackByFnPtr(val reflect.Value) (uintptr, bool) {
+	cbs.lock.RLock()
+	defer cbs.lock.RUnlock()
+	addr, ok := cbs.knownFnPtr[val.Pointer()]
+	return addr, ok
 }
 
 func loadSymbol(handle uintptr, name string) (uintptr, error) {
