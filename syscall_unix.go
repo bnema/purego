@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"sync"
 	"unsafe"
+
+	"github.com/bnema/purego/internal/strings"
 )
 
 var syscall15XABI0 uintptr
@@ -82,7 +84,7 @@ func compileCallback(fn any) uintptr {
 			continue
 		case reflect.Interface, reflect.Func, reflect.Slice,
 			reflect.Chan, reflect.Complex64, reflect.Complex128,
-			reflect.String, reflect.Map, reflect.Invalid:
+			reflect.Map, reflect.Invalid:
 			panic("purego: unsupported argument type: " + in.Kind().String())
 		}
 	}
@@ -211,6 +213,30 @@ func callbackWrap(a *callbackArgs) {
 				}
 			}
 			floatsN += slots
+		case reflect.String:
+			slots = 1
+			var ptr uintptr
+			if intsN+slots > numOfIntegerRegisters() {
+				if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+					ptr = uintptr(callbackArgFromStack(a.args, stackSlot, &stackByteOffset, reflect.TypeOf(uintptr(0))).Uint())
+				} else if stackFrame != nil {
+					if runtime.GOARCH == "s390x" {
+						ptr = uintptr(callbackArgFromSlotBigEndian(unsafe.Pointer(&stackFrame[stackSlot]), reflect.TypeOf(uintptr(0))).Uint())
+					} else {
+						ptr = *(*uintptr)(unsafe.Pointer(&stackFrame[stackSlot]))
+					}
+					stackSlot += slots
+				} else {
+					ptr = frame[stackSlot]
+					stackSlot += slots
+				}
+			} else {
+				pos := intsN + numOfFloatRegisters()
+				ptr = frame[pos]
+			}
+			intsN += slots
+			args[i] = reflect.ValueOf(strings.GoString(ptr))
+			continue
 		case reflect.Struct:
 			if i == 0 && inType.AssignableTo(reflect.TypeOf(CDecl{})) {
 				args[i] = reflect.Zero(inType)
