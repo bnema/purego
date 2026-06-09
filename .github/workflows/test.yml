@@ -8,6 +8,7 @@ env:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
         go: ['1.25.x', '1.26.x', '1.27.x']
@@ -203,6 +204,7 @@ jobs:
 
   minor-arches:
     strategy:
+      fail-fast: false
       matrix:
         go: ['1.25.x', '1.26.x', '1.27.x']
     name: Test with Go ${{ matrix.go }} on Linux minor architectures
@@ -303,6 +305,7 @@ jobs:
 
   bsd:
     strategy:
+      fail-fast: false
       matrix:
         os: ['FreeBSD', 'NetBSD']
         go: ['1.25.8', '1.26.1']
