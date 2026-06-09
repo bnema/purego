@@ -94,6 +94,17 @@ func main() {
 
 Then to run: `CGO_ENABLED=0 go run main.go`
 
+## Callback diagnostics
+
+Callback allocation diagnostics are disabled by default. When debugging callback slot
+exhaustion on Unix-like platforms, set `PUREGO_CALLBACK_LEDGER=1` to append JSONL
+callback lifecycle events to `/tmp/purego-callback-ledger-<pid>.jsonl`, or set
+`PUREGO_CALLBACK_LEDGER_FILE=/path/to/file.jsonl` to choose the output file. Stack
+capture is also disabled by default; set `PUREGO_CALLBACK_LEDGER_STACK=1` when call
+site attribution is needed. For ad-hoc stderr/file traces near callback exhaustion,
+set `PUREGO_CALLBACK_TRACE=1`; `PUREGO_CALLBACK_TRACE_FILE` overrides the default
+`/tmp/purego-callback-trace-<pid>.log` path.
+
 ## Questions
 
 If you have questions about how to incorporate purego in your project or want to discuss

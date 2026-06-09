@@ -196,8 +196,25 @@ type callbackLedgerEvent struct {
 	Error      string `json:"error,omitempty"`
 }
 
+func callbackEnvEnabled(name string) bool {
+	switch strings.ToLower(os.Getenv(name)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func callbackLedgerEnabled() bool {
-	return os.Getenv("PUREGO_CALLBACK_LEDGER") != "0"
+	return callbackEnvEnabled("PUREGO_CALLBACK_LEDGER")
+}
+
+func callbackLedgerStackEnabled() bool {
+	return callbackEnvEnabled("PUREGO_CALLBACK_LEDGER_STACK")
+}
+
+func callbackTraceEnabled() bool {
+	return callbackEnvEnabled("PUREGO_CALLBACK_TRACE")
 }
 
 func callbackLedgerPath() string {
@@ -271,8 +288,13 @@ func recordCallbackLedger(event string, idx int, addr uintptr, fnPtrKey uintptr,
 	if !callbackLedgerEnabled() {
 		return
 	}
-	stack := string(debug.Stack())
-	family, stackKey := classifyCallbackStack(stack)
+	stack := ""
+	family := "unknown"
+	stackKey := "unknown"
+	if callbackLedgerStackEnabled() {
+		stack = string(debug.Stack())
+		family, stackKey = classifyCallbackStack(stack)
+	}
 	cbs.ledgerSeq++
 	occupied := cbs.numFn - len(cbs.holes)
 	entry := callbackLedgerEvent{
@@ -296,7 +318,7 @@ func recordCallbackLedger(event string, idx int, addr uintptr, fnPtrKey uintptr,
 		ReusedSlot: reused,
 		Error:      errText,
 	}
-	if os.Getenv("PUREGO_CALLBACK_LEDGER_STACK") != "0" {
+	if callbackLedgerStackEnabled() {
 		entry.Stack = stack
 	}
 	payload, err := json.Marshal(entry)
@@ -311,6 +333,9 @@ func recordCallbackLedger(event string, idx int, addr uintptr, fnPtrKey uintptr,
 }
 
 func traceCallbackAllocation(event string, val reflect.Value, remaining int) {
+	if !callbackTraceEnabled() {
+		return
+	}
 	message := fmt.Sprintf("PUREGO-CALLBACK-TRACE event=%s remaining=%d live=%d type=%s\n%s\n", event, remaining, maxCB-remaining, val.Type(), debug.Stack())
 	fmt.Fprint(os.Stderr, message)
 	traceFile := os.Getenv("PUREGO_CALLBACK_TRACE_FILE")
