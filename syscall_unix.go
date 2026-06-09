@@ -342,6 +342,10 @@ func traceCallbackAllocation(event string, val reflect.Value, remaining int) {
 	if traceFile == "" {
 		traceFile = fmt.Sprintf("/tmp/purego-callback-trace-%d.log", os.Getpid())
 	}
+	// traceCallbackAllocation intentionally accepts the opt-in
+	// PUREGO_CALLBACK_TRACE_FILE path. Users must set PUREGO_CALLBACK_TRACE=1 to
+	// enable tracing, and callers who override the path control their debugging
+	// environment. This documents the deliberate gosec G304 tradeoff for audits.
 	if f, err := os.OpenFile(traceFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 		_, _ = f.WriteString(message)
 		_ = f.Close()
