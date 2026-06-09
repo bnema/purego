@@ -1,3 +1,3 @@
 module github.com/bnema/purego
 
-go 1.18
+go 1.20

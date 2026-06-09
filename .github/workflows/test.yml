@@ -3,14 +3,15 @@ name: Test
 on: [push, pull_request]
 
 env:
-  QEMU_VERSION: "10.2.1+ds-1"
+  QEMU_VERSION: "11.0.1+ds-1"
 
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
-        go: ['1.18.x', '1.19.x', '1.20.x', '1.21.x', '1.22.x', '1.23.x', '1.24.x', '1.25.x', '1.26.x']
+        go: ['1.20.x', '1.21.x', '1.22.x', '1.23.x', '1.24.x', '1.25.x', '1.26.x']
     name: Test with Go ${{ matrix.go }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     defaults:
@@ -121,15 +122,6 @@ jobs:
           env CGO_ENABLED=0 GOARCH=386 go test -shuffle=on -v -count=10 ./...
           env CGO_ENABLED=1 GOARCH=386 go test -shuffle=on -v -count=10 ./...
 
-      - name: go test (Linux 386)
-        if: ${{ runner.os == 'Linux' && runner.arch != 'ARM64' }}
-        run: |
-           sudo apt-get update
-           sudo apt-get install gcc-multilib
-           sudo apt-get install g++-multilib
-           env CGO_ENABLED=0 GOARCH=386 go test -shuffle=on -v -count=10 ./...
-           env CGO_ENABLED=1 GOARCH=386 go test -shuffle=on -v -count=10 ./...
-      
       - name: go test (Linux arm)
         if: ${{ runner.os == 'Linux' && runner.arch == 'ARM64' }}
         run: |
@@ -156,18 +148,18 @@ jobs:
            go env -u CXX
 
       - name: go test race (no Cgo)
-        if: ${{ runner.os == 'macOS' &&  !startsWith(matrix.go, '1.18.') && !startsWith(matrix.go, '1.19.') }}
+        if: runner.os == 'macOS'
         run: |
           # -race usually requires Cgo, but macOS is an exception. See https://go.dev/doc/articles/race_detector#Requirements
           env CGO_ENABLED=0 go test -race -shuffle=on -v -count=10 ./...
 
       - name: go test race (Cgo)
-        if: ${{ !startsWith(matrix.go, '1.18.') && !startsWith(matrix.go, '1.19.') }}
         run: |
           env CGO_ENABLED=1 go test -race -shuffle=on -v -count=10 ./...
 
   minor-arches:
     strategy:
+      fail-fast: false
       matrix:
         # Test only the latest two Go versions to save CI time.
         # See https://go.dev/doc/devel/release#policy
@@ -255,6 +247,7 @@ jobs:
 
   bsd:
     strategy:
+      fail-fast: false
       matrix:
         os: ['FreeBSD', 'NetBSD']
         # Test only the latest two Go versions to save CI time.
