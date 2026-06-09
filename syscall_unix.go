@@ -7,13 +7,19 @@
 package purego
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"reflect"
 	"runtime"
+	"runtime/debug"
+	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
-	"github.com/bnema/purego/internal/strings"
+	internalstrings "github.com/bnema/purego/internal/strings"
 )
 
 var syscall15XABI0 uintptr
@@ -60,7 +66,10 @@ func NewCallbackFnPtr(fnPtr any) uintptr {
 	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Func {
 		panic("purego: the type must be a function pointer but was not")
 	}
-	if addr, ok := getCallbackByFnPtr(val); ok {
+	if addr, idx, ok := getCallbackByFnPtr(val); ok {
+		cbs.lock.Lock()
+		recordCallbackLedger("dedupe", idx, addr, val.Pointer(), val.Elem(), false, "")
+		cbs.lock.Unlock()
 		return addr
 	}
 	addr := compileCallback(val.Elem().Interface())
@@ -68,6 +77,7 @@ func NewCallbackFnPtr(fnPtr any) uintptr {
 	cbs.knownFnPtr[val.Pointer()] = addr
 	if idx, ok := cbs.knownIdx[addr]; ok {
 		cbs.fnPtrKeys[idx] = val.Pointer()
+		recordCallbackLedger("fnptr-bind", idx, addr, val.Pointer(), val.Elem(), false, "")
 	}
 	cbs.lock.Unlock()
 	return addr
@@ -79,9 +89,12 @@ func UnrefCallback(cb uintptr) error {
 	defer cbs.lock.Unlock()
 	idx, ok := cbs.knownIdx[cb]
 	if !ok {
+		recordCallbackLedger("release-miss", -1, cb, 0, reflect.Value{}, false, "callback not found")
 		return errors.New("callback not found")
 	}
-	if key := cbs.fnPtrKeys[idx]; key != 0 {
+	val := cbs.funcs[idx]
+	key := cbs.fnPtrKeys[idx]
+	if key != 0 {
 		delete(cbs.knownFnPtr, key)
 		cbs.fnPtrKeys[idx] = 0
 	}
@@ -89,6 +102,7 @@ func UnrefCallback(cb uintptr) error {
 	cbs.holes[idx] = struct{}{}
 	cbs.funcs[idx] = reflect.Value{}
 	cbs.argPools[idx] = nil
+	recordCallbackLedger("release", idx, cb, key, val, false, "")
 	return nil
 }
 
@@ -105,19 +119,23 @@ func UnrefCallbackFnPtr(fnPtr any) error {
 	defer cbs.lock.Unlock()
 	addr, ok := cbs.knownFnPtr[val.Pointer()]
 	if !ok {
+		recordCallbackLedger("release-fnptr-miss", -1, 0, val.Pointer(), val.Elem(), false, "callback not found")
 		return errors.New("callback not found")
 	}
 	idx, ok := cbs.knownIdx[addr]
 	if !ok {
 		delete(cbs.knownFnPtr, val.Pointer())
+		recordCallbackLedger("release-fnptr-miss", -1, addr, val.Pointer(), val.Elem(), false, "callback not found")
 		return errors.New("callback not found")
 	}
+	callbackVal := cbs.funcs[idx]
 	delete(cbs.knownFnPtr, val.Pointer())
 	delete(cbs.knownIdx, addr)
 	cbs.fnPtrKeys[idx] = 0
 	cbs.holes[idx] = struct{}{}
 	cbs.funcs[idx] = reflect.Value{}
 	cbs.argPools[idx] = nil
+	recordCallbackLedger("release-fnptr", idx, addr, val.Pointer(), callbackVal, false, "")
 	return nil
 }
 
@@ -134,17 +152,175 @@ var cbs = struct {
 	knownIdx   map[uintptr]int      // callback address -> slot index
 	knownFnPtr map[uintptr]uintptr  // function pointer variable address -> callback address
 	fnPtrKeys  [maxCB]uintptr       // slot index -> function pointer variable address
+	ledgerSeq  uint64               // monotonic callback ledger event sequence
 }{
 	holes:      make(map[int]struct{}),
 	knownIdx:   make(map[uintptr]int, maxCB),
 	knownFnPtr: make(map[uintptr]uintptr, maxCB),
 }
 
-func getCallbackByFnPtr(val reflect.Value) (uintptr, bool) {
+func getCallbackByFnPtr(val reflect.Value) (uintptr, int, bool) {
 	cbs.lock.RLock()
 	defer cbs.lock.RUnlock()
 	addr, ok := cbs.knownFnPtr[val.Pointer()]
-	return addr, ok
+	if !ok {
+		return 0, -1, false
+	}
+	idx, ok := cbs.knownIdx[addr]
+	if !ok {
+		return addr, -1, true
+	}
+	return addr, idx, true
+}
+
+type callbackLedgerEvent struct {
+	Marker     string `json:"marker"`
+	PID        int    `json:"pid"`
+	Seq        uint64 `json:"seq"`
+	Time       string `json:"time"`
+	Event      string `json:"event"`
+	Index      int    `json:"index"`
+	Addr       string `json:"addr,omitempty"`
+	FnPtrKey   string `json:"fn_ptr_key,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Family     string `json:"family"`
+	StackKey   string `json:"stack_key"`
+	NumFn      int    `json:"num_fn"`
+	Occupied   int    `json:"occupied"`
+	Reusable   int    `json:"reusable"`
+	KnownFnPtr int    `json:"known_fn_ptr"`
+	Remaining  int    `json:"remaining"`
+	Max        int    `json:"max"`
+	ReusedSlot bool   `json:"reused_slot,omitempty"`
+	Stack      string `json:"stack,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+func callbackLedgerEnabled() bool {
+	return os.Getenv("PUREGO_CALLBACK_LEDGER") != "0"
+}
+
+func callbackLedgerPath() string {
+	if path := os.Getenv("PUREGO_CALLBACK_LEDGER_FILE"); path != "" {
+		return path
+	}
+	return fmt.Sprintf("/tmp/purego-callback-ledger-%d.jsonl", os.Getpid())
+}
+
+func typeName(val reflect.Value) string {
+	if !val.IsValid() {
+		return ""
+	}
+	return val.Type().String()
+}
+
+func hexUintptr(v uintptr) string {
+	if v == 0 {
+		return ""
+	}
+	return fmt.Sprintf("0x%x", v)
+}
+
+func classifyCallbackStack(stack string) (family, stackKey string) {
+	family = "unknown"
+	stackKey = "unknown"
+	lines := strings.Split(stack, "\n")
+	for i, line := range lines {
+		if line == "" || strings.HasPrefix(line, "goroutine ") || strings.Contains(line, "runtime/debug.Stack") || strings.Contains(line, "recordCallbackLedger") || strings.Contains(line, "traceCallbackAllocation") {
+			continue
+		}
+		if strings.Contains(line, "github.com/bnema/purego.") || strings.Contains(line, "github.com/ebitengine/purego.") {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "/") || strings.HasPrefix(strings.TrimSpace(line), "../") {
+			continue
+		}
+		stackKey = strings.TrimSpace(line)
+		for j := i + 1; j < len(lines); j++ {
+			fileLine := strings.TrimSpace(lines[j])
+			if fileLine == "" {
+				continue
+			}
+			family = classifyCallbackFamily(fileLine + " " + stackKey)
+			return family, stackKey
+		}
+		family = classifyCallbackFamily(stackKey)
+		return family, stackKey
+	}
+	return family, stackKey
+}
+
+func classifyCallbackFamily(s string) string {
+	switch {
+	case strings.Contains(s, "purego-cef2gtk"):
+		return "purego-cef2gtk"
+	case strings.Contains(s, "purego-cef"):
+		return "purego-cef"
+	case strings.Contains(s, "puregotk"):
+		return "puregotk"
+	case strings.Contains(s, "dumber"):
+		return "dumber"
+	case strings.Contains(s, "github.com/bnema/purego") || strings.Contains(s, "/purego/"):
+		return "purego"
+	default:
+		return "unknown"
+	}
+}
+
+func recordCallbackLedger(event string, idx int, addr uintptr, fnPtrKey uintptr, val reflect.Value, reused bool, errText string) {
+	if !callbackLedgerEnabled() {
+		return
+	}
+	stack := string(debug.Stack())
+	family, stackKey := classifyCallbackStack(stack)
+	cbs.ledgerSeq++
+	occupied := cbs.numFn - len(cbs.holes)
+	entry := callbackLedgerEvent{
+		Marker:     "PUREGO-CALLBACK-LEDGER",
+		PID:        os.Getpid(),
+		Seq:        cbs.ledgerSeq,
+		Time:       time.Now().Format(time.RFC3339Nano),
+		Event:      event,
+		Index:      idx,
+		Addr:       hexUintptr(addr),
+		FnPtrKey:   hexUintptr(fnPtrKey),
+		Type:       typeName(val),
+		Family:     family,
+		StackKey:   stackKey,
+		NumFn:      cbs.numFn,
+		Occupied:   occupied,
+		Reusable:   len(cbs.holes),
+		KnownFnPtr: len(cbs.knownFnPtr),
+		Remaining:  maxCB - occupied,
+		Max:        maxCB,
+		ReusedSlot: reused,
+		Error:      errText,
+	}
+	if os.Getenv("PUREGO_CALLBACK_LEDGER_STACK") != "0" {
+		entry.Stack = stack
+	}
+	payload, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	payload = append(payload, '\n')
+	if f, err := os.OpenFile(callbackLedgerPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		_, _ = f.Write(payload)
+		_ = f.Close()
+	}
+}
+
+func traceCallbackAllocation(event string, val reflect.Value, remaining int) {
+	message := fmt.Sprintf("PUREGO-CALLBACK-TRACE event=%s remaining=%d live=%d type=%s\n%s\n", event, remaining, maxCB-remaining, val.Type(), debug.Stack())
+	fmt.Fprint(os.Stderr, message)
+	traceFile := os.Getenv("PUREGO_CALLBACK_TRACE_FILE")
+	if traceFile == "" {
+		traceFile = fmt.Sprintf("/tmp/purego-callback-trace-%d.log", os.Getpid())
+	}
+	if f, err := os.OpenFile(traceFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		_, _ = f.WriteString(message)
+		_ = f.Close()
+	}
 }
 
 func compileCallback(fn any) uintptr {
@@ -188,14 +364,22 @@ output:
 	cbs.lock.Lock()
 	defer cbs.lock.Unlock()
 	index := -1
+	reused := false
 	for i := range cbs.holes {
 		index = i
 		delete(cbs.holes, i)
+		reused = true
 		break
 	}
 	if index < 0 {
-		if cbs.numFn >= maxCB {
+		remaining := maxCB - cbs.numFn
+		if remaining <= 0 {
+			recordCallbackLedger("exhausted", -1, 0, 0, val, false, "maximum callbacks reached")
+			traceCallbackAllocation("exhausted", val, 0)
 			panic("purego: the maximum number of callbacks has been reached")
+		}
+		if remaining <= 100 || remaining%250 == 0 {
+			traceCallbackAllocation("allocated", val, remaining)
 		}
 		index = cbs.numFn
 		cbs.numFn++
@@ -209,6 +393,11 @@ output:
 	}
 	addr := callbackasmAddr(index)
 	cbs.knownIdx[addr] = index
+	if reused {
+		recordCallbackLedger("reuse", index, addr, 0, val, true, "")
+	} else {
+		recordCallbackLedger("alloc", index, addr, 0, val, false, "")
+	}
 	return addr
 }
 
@@ -329,7 +518,7 @@ func callbackWrap(a *callbackArgs) {
 				ptr = frame[pos]
 			}
 			intsN += slots
-			args[i] = reflect.ValueOf(strings.GoString(ptr))
+			args[i] = reflect.ValueOf(internalstrings.GoString(ptr))
 			continue
 		case reflect.Struct:
 			if i == 0 && inType.AssignableTo(reflect.TypeOf(CDecl{})) {
