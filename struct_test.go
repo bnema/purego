@@ -17,8 +17,8 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/ebitengine/purego"
-	"github.com/ebitengine/purego/internal/load"
+	"github.com/bnema/purego"
+	"github.com/bnema/purego/internal/load"
 )
 
 func TestRegisterFunc_structArgs(t *testing.T) {

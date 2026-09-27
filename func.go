@@ -14,7 +14,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/ebitengine/purego/internal/strings"
+	"github.com/bnema/purego/internal/strings"
 )
 
 const (

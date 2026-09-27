@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ebitengine/purego"
-	"github.com/ebitengine/purego/objc"
+	"github.com/bnema/purego"
+	"github.com/bnema/purego/objc"
 )
 
 var superTestClassID atomic.Uint64

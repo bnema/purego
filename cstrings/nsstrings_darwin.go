@@ -6,9 +6,9 @@ package cstrings
 import (
 	"fmt"
 
-	"github.com/ebitengine/purego"
-	"github.com/ebitengine/purego/internal/strings"
-	"github.com/ebitengine/purego/objc"
+	"github.com/bnema/purego"
+	"github.com/bnema/purego/internal/strings"
+	"github.com/bnema/purego/objc"
 )
 
 var (
