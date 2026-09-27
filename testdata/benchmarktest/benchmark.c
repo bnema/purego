@@ -2,6 +2,16 @@
 // SPDX-FileCopyrightText: 2026 The Ebitengine Authors
 
 #include <stdint.h>
+#include <time.h>
+
+void write_through(uint64_t *p, uint64_t v) {
+  *p = v;
+  struct timespec start, now;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  do {
+    clock_gettime(CLOCK_MONOTONIC, &now);
+  } while ((now.tv_sec - start.tv_sec) * 1000000000L + now.tv_nsec - start.tv_nsec < 2000000L);
+}
 
 int64_t sum1_c(int64_t a1) { return a1; }
 
