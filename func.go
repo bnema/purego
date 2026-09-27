@@ -175,7 +175,7 @@ func RegisterFunc(fptr any, cfn uintptr) {
 				}
 			case reflect.String, reflect.Uintptr, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32,
 				reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Pointer, reflect.UnsafePointer,
-				reflect.Slice, reflect.Bool:
+				reflect.Slice, reflect.Array, reflect.Bool:
 				if ints < numOfIntegerRegisters() {
 					ints++
 				} else {
@@ -461,6 +461,19 @@ func RegisterFunc(fptr any, cfn uintptr) {
 			}
 		case reflect.Struct:
 			v = getStruct(outType, *syscall)
+		case reflect.Slice:
+			if outType.Elem().Kind() != reflect.String {
+				panic("purego: unsupported return slice element kind: " + outType.Elem().Kind().String())
+			}
+			// C returns a NULL-terminated char** array.
+			if syscall.a1 != 0 {
+				var result []string
+				p := *(*unsafe.Pointer)(unsafe.Pointer(&syscall.a1))
+				for ; *(*uintptr)(p) != 0; p = unsafe.Add(p, unsafe.Sizeof(uintptr(0))) {
+					result = append(result, strings.GoString(*(*uintptr)(p)))
+				}
+				v = reflect.ValueOf(result).Convert(outType)
+			}
 		default:
 			panic("purego: unsupported return kind: " + outType.Kind().String())
 		}
@@ -502,7 +515,30 @@ func addValue(v reflect.Value, keepAlive []any, addInt func(x uintptr), addFloat
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32:
 		addInt(uintptr(v.Int()))
-	case reflect.Pointer, reflect.UnsafePointer, reflect.Slice:
+	case reflect.Slice:
+		if v.Type().Elem().Kind() != reflect.String {
+			// There is no need to keepAlive this pointer separately because it is kept alive in the args variable
+			addInt(v.Pointer())
+			break
+		}
+		if v.IsNil() {
+			addInt(0)
+			break
+		}
+		// Pass []string as a NULL-terminated char** array.
+		res := make([]*byte, v.Len()+1)
+		for i := range v.Len() {
+			res[i] = strings.CString(v.Index(i).String())
+		}
+		keepAlive = append(keepAlive, res)
+		addInt(uintptr(unsafe.Pointer(&res[0])))
+	case reflect.Array:
+		// C array parameters decay to pointers, so pass a pointer to a copy.
+		tmp := reflect.New(v.Type())
+		tmp.Elem().Set(v)
+		keepAlive = append(keepAlive, tmp)
+		addInt(tmp.Pointer())
+	case reflect.Pointer, reflect.UnsafePointer:
 		// There is no need to keepAlive this pointer separately because it is kept alive in the args variable
 		addInt(v.Pointer())
 	case reflect.Func:
