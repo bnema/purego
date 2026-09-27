@@ -63,8 +63,14 @@ func SyscallN(fn uintptr, args ...uintptr) (r1, r2, err uintptr) {
 		panic("purego: too many arguments to SyscallN")
 	}
 
+	// Add padding so there is no out-of-bounds slicing.
 	var tmp [maxArgs]uintptr
-	copy(tmp[:], args)
+	n := copy(tmp[:], args)
+	return syscallPadded(fn, &tmp, n)
+}
+
+// syscallPadded calls fn with the first n values of tmp as arguments.
+func syscallPadded(fn uintptr, tmp *[maxArgs]uintptr, n int) (r1, r2, err uintptr) {
 	var floats [maxArgs]uintptr
 	copy(floats[:], tmp[:])
 	s := syscall_SyscallN(fn, tmp[:], floats[:], 0)
