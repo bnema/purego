@@ -56,6 +56,40 @@ func NewCallback(fn any) uintptr {
 	return compileCallback(fn)
 }
 
+// CallbackArgs is the integer-class argument block of one C call into a
+// NewCallbackInts callback. It is only valid during the callback.
+type CallbackArgs struct {
+	frame      unsafe.Pointer
+	intFrame   unsafe.Pointer
+	stackFrame unsafe.Pointer
+}
+
+// Int returns the i-th integer-class argument (0-based), following the
+// platform C ABI: integer registers first, then stack slots.
+func (a *CallbackArgs) Int(i int) uintptr {
+	if i < numOfIntegerRegisters() {
+		if a.intFrame != nil {
+			return (*[callbackMaxFrame]uintptr)(a.intFrame)[i]
+		}
+		return (*[callbackMaxFrame]uintptr)(a.frame)[numOfFloatRegisters()+i]
+	}
+	k := i - numOfIntegerRegisters()
+	if a.stackFrame != nil {
+		return (*[callbackMaxFrame]uintptr)(a.stackFrame)[k]
+	}
+	return (*[callbackMaxFrame]uintptr)(a.frame)[numOfFloatRegisters()+numOfIntegerRegisters()+k]
+}
+
+// NewCallbackInts returns a C function pointer that calls fn with the raw
+// integer-class arguments of the C call and returns its result in the C
+// integer return register. Only integer-class C parameters (integers,
+// pointers) are supported; float arguments are not visible. The call path
+// does no reflection and no allocation. Like NewCallback, the callback is
+// never freed and counts against the callback limit.
+func NewCallbackInts(fn func(a *CallbackArgs) uintptr) uintptr {
+	return compileFastCallback(fn)
+}
+
 // NewCallbackFnPtr converts a Go function pointer to a function pointer conforming to the C calling convention.
 // Calling this function multiple times with the same function pointer returns the original callback address.
 func NewCallbackFnPtr(fnPtr any) uintptr {
@@ -101,6 +135,7 @@ func UnrefCallback(cb uintptr) error {
 	delete(cbs.knownIdx, cb)
 	cbs.holes[idx] = struct{}{}
 	cbs.funcs[idx] = reflect.Value{}
+	cbs.fast[idx] = nil
 	recordCallbackLedger("release", idx, cb, key, val, false, "")
 	return nil
 }
@@ -143,13 +178,14 @@ const maxCB = 2000
 
 var cbs = struct {
 	lock       sync.RWMutex
-	numFn      int                  // the highest allocated callback index + 1
-	holes      map[int]struct{}     // reusable callback slots
-	funcs      [maxCB]reflect.Value // the saved callbacks
-	knownIdx   map[uintptr]int      // callback address -> slot index
-	knownFnPtr map[uintptr]uintptr  // function pointer variable address -> callback address
-	fnPtrKeys  [maxCB]uintptr       // slot index -> function pointer variable address
-	ledgerSeq  uint64               // monotonic callback ledger event sequence
+	numFn      int                                // the highest allocated callback index + 1
+	holes      map[int]struct{}                   // reusable callback slots
+	funcs      [maxCB]reflect.Value               // the saved callbacks
+	fast       [maxCB]func(*CallbackArgs) uintptr // integer-only callbacks
+	knownIdx   map[uintptr]int                    // callback address -> slot index
+	knownFnPtr map[uintptr]uintptr                // function pointer variable address -> callback address
+	fnPtrKeys  [maxCB]uintptr                     // slot index -> function pointer variable address
+	ledgerSeq  uint64                             // monotonic callback ledger event sequence
 }{
 	holes:      make(map[int]struct{}),
 	knownIdx:   make(map[uintptr]int, maxCB),
@@ -389,6 +425,20 @@ output:
 	}
 	cbs.lock.Lock()
 	defer cbs.lock.Unlock()
+	return allocateCallback(val, nil)
+}
+
+func compileFastCallback(fn func(*CallbackArgs) uintptr) uintptr {
+	if fn == nil {
+		panic("purego: function must not be nil")
+	}
+	cbs.lock.Lock()
+	defer cbs.lock.Unlock()
+	return allocateCallback(reflect.Value{}, fn)
+}
+
+// allocateCallback is called with cbs.lock held.
+func allocateCallback(val reflect.Value, fast func(*CallbackArgs) uintptr) uintptr {
 	index := -1
 	reused := false
 	for i := range cbs.holes {
@@ -401,16 +451,19 @@ output:
 		remaining := maxCB - cbs.numFn
 		if remaining <= 0 {
 			recordCallbackLedger("exhausted", -1, 0, 0, val, false, "maximum callbacks reached")
-			traceCallbackAllocation("exhausted", val, 0)
+			if val.IsValid() {
+				traceCallbackAllocation("exhausted", val, 0)
+			}
 			panic("purego: the maximum number of callbacks has been reached")
 		}
-		if remaining <= 100 || remaining%250 == 0 {
+		if val.IsValid() && (remaining <= 100 || remaining%250 == 0) {
 			traceCallbackAllocation("allocated", val, remaining)
 		}
 		index = cbs.numFn
 		cbs.numFn++
 	}
 	cbs.funcs[index] = val
+	cbs.fast[index] = fast
 	addr := callbackasmAddr(index)
 	cbs.knownIdx[addr] = index
 	if reused {
@@ -437,9 +490,22 @@ var callbackasmABI0 = uintptr(unsafe.Pointer(&__callbackasm))
 // This closure is used inside sys_darwin_GOARCH.s
 var callbackWrap_call = callbackWrap
 
+// noescape is runtime.noescape; the synchronous callee must not retain p.
+//go:noescape
+//go:linkname noescape runtime.noescape
+func noescape(p unsafe.Pointer) unsafe.Pointer
+
 // callbackWrap is called by assembly code which determines which Go function to call.
 // This function takes the arguments and passes them to the Go function and returns the result.
 func callbackWrap(a *callbackArgs) {
+	// Slots are published under the lock before the C pointer is handed out.
+	// A caller must not invoke a released callback while UnrefCallback reuses
+	// its slot; while callable, fast slots are never cleared.
+	if f := cbs.fast[a.index]; f != nil {
+		ca := CallbackArgs{frame: a.args, intFrame: a.intFrame(), stackFrame: a.stackFrame()}
+		a.result[0] = f((*CallbackArgs)(noescape(unsafe.Pointer(&ca))))
+		return
+	}
 	cbs.lock.Lock()
 	fn := cbs.funcs[a.index]
 	cbs.lock.Unlock()

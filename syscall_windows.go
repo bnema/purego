@@ -52,6 +52,21 @@ func NewCallback(fn any) uintptr {
 	return syscall.NewCallback(fn)
 }
 
+// CallbackArgs is the integer-class argument block of one C call into a
+// NewCallbackInts callback. It is only valid during the callback.
+type CallbackArgs struct{}
+
+// Int returns the i-th integer-class argument (0-based), following the platform C ABI.
+func (a *CallbackArgs) Int(i int) uintptr {
+	panic("purego: NewCallbackInts is not supported on windows")
+}
+
+// NewCallbackInts returns a C function pointer for an integer-class callback.
+// It is not supported on Windows.
+func NewCallbackInts(fn func(a *CallbackArgs) uintptr) uintptr {
+	panic("purego: NewCallbackInts is not supported on windows")
+}
+
 // NewCallbackFnPtr converts a Go function pointer to a Windows callback and reuses an existing callback when possible.
 func NewCallbackFnPtr(fnPtr any) uintptr {
 	val := reflect.ValueOf(fnPtr)
