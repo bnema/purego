@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/bnema/purego"
@@ -145,6 +146,49 @@ func BenchmarkCallingMethods(b *testing.B) {
 			})
 		}
 	})
+
+	// Fixed-arity integer calls compared with literal SyscallN arguments.
+	b.Run("Syscall6", func(b *testing.B) {
+		b.ReportAllocs()
+		fn := testCases[3].cFnPtr
+		var result uintptr
+		b.ResetTimer()
+		for range b.N {
+			result, _, _ = purego.Syscall6(fn, 1, 2, 3, 4, 5, 0)
+		}
+		if result != 15 {
+			b.Fatalf("sum = %d", result)
+		}
+	})
+	b.Run("SyscallNLiteral", func(b *testing.B) {
+		b.ReportAllocs()
+		fn := testCases[3].cFnPtr
+		var result uintptr
+		b.ResetTimer()
+		for range b.N {
+			result, _, _ = purego.SyscallN(fn, 1, 2, 3, 4, 5, 0)
+		}
+		if result != 15 {
+			b.Fatalf("sum = %d", result)
+		}
+	})
+	if runtime.GOOS != "windows" {
+		b.Run("CallbackInts", func(b *testing.B) {
+			b.ReportAllocs()
+			cb := purego.NewCallbackInts(func(a *purego.CallbackArgs) uintptr {
+				return a.Int(0) + a.Int(1) + a.Int(2) + a.Int(3) + a.Int(4)
+			})
+			fn := testCases[3].cCallbackPtr
+			var result uintptr
+			b.ResetTimer()
+			for range b.N {
+				result, _, _ = purego.Syscall6(fn, cb, 1, 2, 3, 4, 5)
+			}
+			if result != 15 {
+				b.Fatalf("sum = %d", result)
+			}
+		})
+	}
 
 	// Benchmark round-trip: Go → C → Go callback (realistic use case)
 	b.Run("RoundTrip/GoC", func(b *testing.B) {
