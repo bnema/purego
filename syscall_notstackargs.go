@@ -17,7 +17,6 @@ import "unsafe"
 // the runtime's own callback mechanism, so this type is compiled but unused,
 // serving only as a stub to satisfy cross-platform compilation.
 type callbackArgs struct {
-	_     hostLayout
 	index uintptr
 	// args points to the argument block.
 	//
@@ -35,4 +34,22 @@ type callbackArgs struct {
 
 func (c *callbackArgs) stackFrame() unsafe.Pointer {
 	return nil
+}
+
+func (c *callbackArgs) intFrame() unsafe.Pointer {
+	return nil
+}
+
+func (c *callbackArgs) setInt64Result(result int64) {
+	c.result[0] = uintptr(result)
+	if unsafe.Sizeof(uintptr(0)) == 4 {
+		c.result[1] = uintptr(result >> 32)
+	}
+}
+
+func (c *callbackArgs) setUint64Result(result uint64) {
+	c.result[0] = uintptr(result)
+	if unsafe.Sizeof(uintptr(0)) == 4 {
+		c.result[1] = uintptr(result >> 32)
+	}
 }

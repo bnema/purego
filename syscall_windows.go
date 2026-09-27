@@ -11,10 +11,10 @@ import (
 	"unsafe"
 )
 
-var syscall15XABI0 uintptr
+var syscallXABI0 uintptr
 
-func syscall_syscall15X(fn, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 uintptr) (r1, r2, err uintptr) {
-	r1, r2, errno := syscall.Syscall15(fn, 15, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15)
+func syscall_syscallN(fn uintptr, args ...uintptr) (r1, r2, err uintptr) {
+	r1, r2, errno := syscall.SyscallN(fn, args...)
 	return r1, r2, uintptr(errno)
 }
 
@@ -23,14 +23,22 @@ func syscall_syscall15X(fn, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a
 // function with one uintptr-sized result. The function must not have arguments with size larger than the
 // size of uintptr. Only a limited number of callbacks may be created in a single Go process, and any memory
 // allocated for these callbacks is never released. Between NewCallback and NewCallbackCDecl, at least 1024
-// callbacks can always be created. Although this function is similiar to the darwin version it may act
+// callbacks can always be created. Although this function is similar to the darwin version it may act
 // differently.
+//
+// Every call to NewCallback creates a new callback even for the same function value, so passing a Go callback to C
+// inside a loop (e.g. a qsort comparator) keeps consuming callbacks and eventually panics once they are exhausted.
+// The same happens when a func value is passed to a C function, as [RegisterFunc] creates a new callback for each
+// call. Create the callback once with NewCallback and reuse the returned pointer instead.
 func NewCallback(fn any) uintptr {
 	isCDecl := false
 	ty := reflect.TypeOf(fn)
-	for i := 0; i < ty.NumIn(); i++ {
+	if ty == nil || ty.Kind() != reflect.Func {
+		panic("purego: the type must be a function but was not")
+	}
+	for i := range ty.NumIn() {
 		in := ty.In(i)
-		if !in.AssignableTo(reflect.TypeOf(CDecl{})) {
+		if !in.AssignableTo(reflect.TypeFor[CDecl]()) {
 			continue
 		}
 		if i != 0 {

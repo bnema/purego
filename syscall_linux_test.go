@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -119,8 +119,8 @@ func compareStatus(filter, expect string) error {
 			//    "... : bad file descriptor.
 			continue
 		}
-		lines := strings.Split(string(d), "\n")
-		for _, line := range lines {
+		lines := strings.SplitSeq(string(d), "\n")
+		for line := range lines {
 			// Different kernel vintages pad differently.
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "Pid:\t") {
@@ -149,7 +149,7 @@ func compareStatus(filter, expect string) error {
 					// https://github.com/golang/go/issues/46145
 					// Containers don't reliably output this line in sorted order so manually sort and compare that.
 					a := strings.Split(line[8:], " ")
-					sort.Slice(a, func(i, j int) bool { return a[i] < a[j] })
+					slices.Sort(a)
 					got := strings.Join(a, " ")
 					if got == expected[8:] {
 						foundAThread = true
@@ -173,7 +173,7 @@ func compareStatus(filter, expect string) error {
 func TestDlopenThenAllThreadsSyscall(t *testing.T) {
 	// Step 1: Build and load a shared C library that calls back into Go.
 	libFileName := filepath.Join(t.TempDir(), "libcbtest.so")
-	if err := buildSharedLib("CC", libFileName, filepath.Join("testdata", "libcbtest", "callback_test.c")); err != nil {
+	if err := buildSharedLib(t, "CC", libFileName, filepath.Join("testdata", "libcbtest", "callback_test.c")); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(libFileName)
@@ -192,12 +192,12 @@ func TestDlopenThenAllThreadsSyscall(t *testing.T) {
 	}
 
 	cb := purego.NewCallback(goFunc)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		callCallback(cb, "hello")
 	}
 
 	// Step 2: Generate thread churn + AllThreadsSyscall (via Setuid).
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		c := make(chan struct{})
 		go func() {
 			runtime.LockOSThread()

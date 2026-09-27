@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"structs"
 	"testing"
 
 	"github.com/bnema/purego"
@@ -38,6 +39,7 @@ func ExampleRegisterClass_helloworld() {
 }
 
 func ExampleRegisterClass() {
+	var class objc.Class
 	var (
 		sel_new    = objc.RegisterName("new")
 		sel_init   = objc.RegisterName("init")
@@ -45,11 +47,12 @@ func ExampleRegisterClass() {
 		sel_bar    = objc.RegisterName("bar")
 
 		BarInit = func(id objc.ID, cmd objc.SEL) objc.ID {
-			return id.SendSuper(cmd)
+			return id.SendSuper2(class, cmd)
 		}
 	)
 
-	class, err := objc.RegisterClass(
+	var err error
+	class, err = objc.RegisterClass(
 		"BarObject",
 		objc.GetClass("NSObject"),
 		[]*objc.Protocol{
@@ -58,12 +61,12 @@ func ExampleRegisterClass() {
 		[]objc.FieldDef{
 			{
 				Name:      "bar",
-				Type:      reflect.TypeOf(int(0)),
+				Type:      reflect.TypeFor[int](),
 				Attribute: objc.ReadWrite,
 			},
 			{
 				Name:      "foo",
-				Type:      reflect.TypeOf(false),
+				Type:      reflect.TypeFor[bool](),
 				Attribute: objc.ReadWrite,
 			},
 		},
@@ -94,17 +97,25 @@ func ExampleIMP() {
 	// Output: IMP: 105 567 9 2 3 -5 4 8 9
 }
 
-func ExampleID_SendSuper() {
-	super, err := objc.RegisterClass(
-		"SuperObject",
+// This example shows three-level inheritance with Base <- Child1 <- Child2.
+// SendSuper2 takes Child1, the class defining the method.
+func ExampleID_SendSuper2() {
+	_, err := purego.Dlopen("/System/Library/Frameworks/Foundation.framework/Foundation", purego.RTLD_GLOBAL|purego.RTLD_NOW)
+	if err != nil {
+		panic(err)
+	}
+
+	sel := objc.RegisterName("run")
+	base, err := objc.RegisterClass(
+		"SuperExampleBase",
 		objc.GetClass("NSObject"),
 		nil,
 		nil,
 		[]objc.MethodDef{
 			{
-				Cmd: objc.RegisterName("doSomething"),
-				Fn: func(self objc.ID, _cmd objc.SEL) {
-					fmt.Println("In Super!")
+				Cmd: sel,
+				Fn: func(self objc.ID, cmd objc.SEL) {
+					fmt.Println("Base")
 				},
 			},
 		},
@@ -113,17 +124,19 @@ func ExampleID_SendSuper() {
 		panic(err)
 	}
 
-	child, err := objc.RegisterClass(
-		"ChildObject",
-		super,
+	var child1 objc.Class
+	child1, err = objc.RegisterClass(
+		"SuperExampleChild1",
+		base,
 		nil,
 		nil,
 		[]objc.MethodDef{
 			{
-				Cmd: objc.RegisterName("doSomething"),
-				Fn: func(self objc.ID, _cmd objc.SEL) {
-					fmt.Println("In Child")
-					self.SendSuper(_cmd)
+				Cmd: sel,
+				Fn: func(self objc.ID, cmd objc.SEL) {
+					// Start lookup in the superclass of Child1.
+					fmt.Print("SendSuper2: ")
+					self.SendSuper2(child1, cmd)
 				},
 			},
 		},
@@ -132,9 +145,27 @@ func ExampleID_SendSuper() {
 		panic(err)
 	}
 
-	objc.ID(child).Send(objc.RegisterName("new")).Send(objc.RegisterName("doSomething"))
-	// Output: In Child
-	// In Super!
+	// Child2 inherits Child1's implementation of run.
+	child2, err := objc.RegisterClass("SuperExampleChild2", child1, nil, nil, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, class := range []objc.Class{child1, child2} {
+		object := objc.ID(class).Send(objc.RegisterName("new"))
+		defer object.Send(objc.RegisterName("release"))
+		if class == child1 {
+			fmt.Println("Child1 instance")
+		} else {
+			fmt.Println("Child2 instance")
+		}
+		object.Send(sel)
+	}
+	// Output:
+	// Child1 instance
+	// SendSuper2: Base
+	// Child2 instance
+	// SendSuper2: Base
 }
 
 func TestSend(t *testing.T) {
@@ -155,6 +186,7 @@ func TestSend(t *testing.T) {
 
 func ExampleSend() {
 	type NSRange struct {
+		_               structs.HostLayout
 		Location, Range uint
 	}
 	class_NSString := objc.GetClass("NSString")
@@ -164,11 +196,11 @@ func ExampleSend() {
 	subString := objc.ID(class_NSString).Send(sel_stringWithUTF8String, "lo, Wor\x00")
 
 	r := objc.Send[NSRange](fullString, objc.RegisterName("rangeOfString:"), subString)
-	fmt.Println(r)
-	// Output: {3 7}
+	fmt.Println(r.Location, r.Range)
+	// Output: 3 7
 }
 
-func ExampleSendSuper() {
+func ExampleSendSuper2() {
 	super, err := objc.RegisterClass(
 		"SuperObject2",
 		objc.GetClass("NSObject"),
@@ -205,7 +237,7 @@ func ExampleSendSuper() {
 		panic(err)
 	}
 
-	res := objc.SendSuper[int](objc.ID(child).Send(objc.RegisterName("new")), objc.RegisterName("doSomething"))
+	res := objc.SendSuper2[int](objc.ID(child).Send(objc.RegisterName("new")), child, objc.RegisterName("doSomething"))
 	fmt.Println(res)
 	// Output: 16
 }

@@ -14,7 +14,14 @@ import (
 	"github.com/bnema/purego/internal/strings"
 )
 
-func getStruct(outType reflect.Type, syscall syscall15Args) (v reflect.Value) {
+// structReturnInMemory always reports false on arm64: a struct returned in
+// memory is passed through the dedicated indirect result register (R8), not as
+// an ordinary integer argument, so it is handled separately.
+func structReturnInMemory(reflect.Type) bool {
+	return false
+}
+
+func getStruct(outType reflect.Type, syscall syscallArgs) (v reflect.Value) {
 	outSize := outType.Size()
 	switch {
 	case outSize == 0:
@@ -78,9 +85,9 @@ func addStruct(v reflect.Value, numInts, numFloats, numStack *int, addInt, addFl
 	if hva, hfa, size := isHVA(v.Type()), isHFA(v.Type()), v.Type().Size(); hva || hfa || size <= 16 {
 		// if this doesn't fit entirely in registers then
 		// each element goes onto the stack
-		if hfa && *numFloats+v.NumField() > numOfFloatRegisters() {
+		if hfa && *numFloats+numABIFields(v.Type()) > numOfFloatRegisters() {
 			*numFloats = numOfFloatRegisters()
-		} else if hva && *numInts+v.NumField() > numOfIntegerRegisters() {
+		} else if hva && *numInts+numABIFields(v.Type()) > numOfIntegerRegisters() {
 			*numInts = numOfIntegerRegisters()
 		}
 
@@ -92,7 +99,7 @@ func addStruct(v reflect.Value, numInts, numFloats, numStack *int, addInt, addFl
 }
 
 func placeRegisters(v reflect.Value, addFloat func(uintptr), addInt func(uintptr)) {
-	if runtime.GOOS == "darwin" {
+	if isDarwin {
 		placeRegistersDarwin(v, addFloat, addInt)
 		return
 	}
@@ -112,7 +119,10 @@ func placeRegistersArm64(v reflect.Value, addFloat func(uintptr), addInt func(ui
 		} else {
 			numFields = v.Type().Len()
 		}
-		for k := 0; k < numFields; k++ {
+		for k := range numFields {
+			if v.Kind() == reflect.Struct && !isABIField(v.Type().Field(k)) {
+				continue
+			}
 			flushed = false
 			var f reflect.Value
 			if v.Kind() == reflect.Struct {
@@ -229,52 +239,39 @@ func placeStack(v reflect.Value, keepAlive []any, addInt func(uintptr)) []any {
 //
 // [Arm64 Calling Convention]: https://github.com/ARM-software/abi-aa/blob/main/sysvabi64/sysvabi64.rst
 func isHFA(t reflect.Type) bool {
+	// round up struct size to nearest 8 see section B.4
 	structSize := roundUpTo8(t.Size())
-	if structSize == 0 {
+	numFields := numABIFields(t)
+	if structSize == 0 || numFields > 4 {
 		return false
 	}
-	var kind reflect.Kind
-	var members int
-	var walk func(reflect.Type) bool
-	walk = func(t reflect.Type) bool {
-		for i := 0; i < t.NumField(); i++ {
-			ft := t.Field(i).Type
-			switch ft.Kind() {
-			case reflect.Float32, reflect.Float64:
-				if kind == 0 {
-					kind = ft.Kind()
-				} else if ft.Kind() != kind {
-					return false
-				}
-				members++
-				if members > 4 {
-					return false
-				}
-			case reflect.Struct:
-				if !walk(ft) {
-					return false
-				}
-			case reflect.Array:
-				elemKind := ft.Elem().Kind()
-				if elemKind != reflect.Float32 && elemKind != reflect.Float64 {
-					return false
-				}
-				if kind == 0 {
-					kind = elemKind
-				} else if elemKind != kind {
-					return false
-				}
-				members += ft.Len()
-				if members > 4 {
-					return false
-				}
-			default:
+	first := abiField(t, 0)
+	switch first.Type.Kind() {
+	case reflect.Float32, reflect.Float64:
+		firstKind := first.Type.Kind()
+		for i := range numFields {
+			if abiField(t, i).Type.Kind() != firstKind {
 				return false
 			}
 		}
 		return true
+	case reflect.Array:
+		switch first.Type.Elem().Kind() {
+		case reflect.Float32, reflect.Float64:
+			return true
+		default:
+			return false
+		}
+	case reflect.Struct:
+		for range numABIFields(first.Type) {
+			if !isHFA(first.Type) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
 	}
-	return walk(t) && members > 0
 }
 
 // isHVA reports a Homogeneous Aggregate with a Fundamental Data Type that is a Short-Vector type
@@ -290,12 +287,13 @@ func isHVA(t reflect.Type) bool {
 	if structSize == 0 || (structSize != 8 && structSize != 16) {
 		return false
 	}
-	first := t.Field(0)
+	numFields := numABIFields(t)
+	first := abiField(t, 0)
 	switch first.Type.Kind() {
 	case reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Int8, reflect.Int16, reflect.Int32:
 		firstKind := first.Type.Kind()
-		for i := 0; i < t.NumField(); i++ {
-			if t.Field(i).Type.Kind() != firstKind {
+		for i := range numFields {
+			if abiField(t, i).Type.Kind() != firstKind {
 				return false
 			}
 		}
@@ -315,7 +313,7 @@ func isHVA(t reflect.Type) bool {
 // copyStruct8ByteChunks copies struct memory in 8-byte chunks to the provided callback.
 // This is used for Darwin ARM64's byte-level packing of non-HFA/HVA structs.
 func copyStruct8ByteChunks(ptr unsafe.Pointer, size uintptr, addChunk func(uintptr)) {
-	if runtime.GOOS != "darwin" {
+	if !isDarwin {
 		panic("purego: should only be called on darwin")
 	}
 	for offset := uintptr(0); offset < size; offset += 8 {
@@ -325,7 +323,7 @@ func copyStruct8ByteChunks(ptr unsafe.Pointer, size uintptr, addChunk func(uintp
 			chunk = *(*uintptr)(unsafe.Add(ptr, offset))
 		} else {
 			// Read byte-by-byte to avoid reading beyond allocation
-			for i := uintptr(0); i < remaining; i++ {
+			for i := range remaining {
 				b := *(*byte)(unsafe.Add(ptr, offset+i))
 				chunk |= uintptr(b) << (i * 8)
 			}
@@ -342,7 +340,7 @@ func copyStruct8ByteChunks(ptr unsafe.Pointer, size uintptr, addChunk func(uintp
 // For non-HFA/HVA structs, Darwin uses byte-level packing. We copy the struct memory in
 // 8-byte chunks, which works correctly for both register and stack placement.
 func placeRegistersDarwin(v reflect.Value, addFloat func(uintptr), addInt func(uintptr)) {
-	if runtime.GOOS != "darwin" {
+	if !isDarwin {
 		panic("purego: placeRegistersDarwin should only be called on darwin")
 	}
 	// Check if this is an HFA/HVA
@@ -370,7 +368,7 @@ func placeRegistersDarwin(v reflect.Value, addFloat func(uintptr), addInt func(u
 // shouldBundleStackArgs determines if we need to start C-style packing for
 // Darwin ARM64 stack arguments. This happens when registers are exhausted.
 func shouldBundleStackArgs(v reflect.Value, numInts, numFloats int) bool {
-	if runtime.GOOS != "darwin" {
+	if !isDarwin {
 		return false
 	}
 
@@ -395,12 +393,12 @@ func shouldBundleStackArgs(v reflect.Value, numInts, numFloats int) bool {
 	}
 
 	if hfa {
-		need := v.NumField()
+		need := numABIFields(v.Type())
 		return numFloats+need > numOfFloatRegisters()
 	}
 
 	if hva {
-		need := v.NumField()
+		need := numABIFields(v.Type())
 		return numInts+need > numOfIntegerRegisters()
 	}
 
@@ -412,7 +410,7 @@ func shouldBundleStackArgs(v reflect.Value, numInts, numFloats int) bool {
 // registers, used during stack argument bundling to decide if a struct
 // should go through normal register allocation or be bundled with stack args.
 func structFitsInRegisters(val reflect.Value, tempNumInts, tempNumFloats int) (bool, int, int) {
-	if runtime.GOOS != "darwin" {
+	if !isDarwin {
 		panic("purego: structFitsInRegisters should only be called on darwin")
 	}
 	hfa := isHFA(val.Type())
@@ -421,13 +419,13 @@ func structFitsInRegisters(val reflect.Value, tempNumInts, tempNumFloats int) (b
 
 	if hfa {
 		// HFA: check if elements fit in float registers
-		if tempNumFloats+val.NumField() <= numOfFloatRegisters() {
-			return true, tempNumInts, tempNumFloats + val.NumField()
+		if numFields := numABIFields(val.Type()); tempNumFloats+numFields <= numOfFloatRegisters() {
+			return true, tempNumInts, tempNumFloats + numFields
 		}
 	} else if hva {
 		// HVA: check if elements fit in int registers
-		if tempNumInts+val.NumField() <= numOfIntegerRegisters() {
-			return true, tempNumInts + val.NumField(), tempNumFloats
+		if numFields := numABIFields(val.Type()); tempNumInts+numFields <= numOfIntegerRegisters() {
+			return true, tempNumInts + numFields, tempNumFloats
 		}
 	} else if size <= 16 {
 		// Non-HFA/HVA small structs use int registers for byte-packing
@@ -445,7 +443,7 @@ func structFitsInRegisters(val reflect.Value, tempNumInts, tempNumFloats int) (b
 func collectStackArgs(args []reflect.Value, startIdx int, numInts, numFloats int,
 	keepAlive []any, addInt, addFloat, addStack func(uintptr),
 	pNumInts, pNumFloats, pNumStack *int) ([]reflect.Value, []any) {
-	if runtime.GOOS != "darwin" {
+	if !isDarwin {
 		panic("purego: collectStackArgs should only be called on darwin")
 	}
 
@@ -502,7 +500,7 @@ const (
 // bundleStackArgs bundles remaining arguments for Darwin ARM64 C-style stack packing.
 // It creates a packed struct with proper alignment and copies it to the stack in 8-byte chunks.
 func bundleStackArgs(stackArgs []reflect.Value, addStack func(uintptr)) {
-	if runtime.GOOS != "darwin" {
+	if !isDarwin {
 		panic("purego: bundleStackArgs should only be called on darwin")
 	}
 	if len(stackArgs) == 0 {
@@ -528,7 +526,7 @@ func bundleStackArgs(stackArgs []reflect.Value, addStack func(uintptr)) {
 			paddingNeeded := uintptr(valAlign) - (currentOffset % uintptr(valAlign))
 			fields = append(fields, reflect.StructField{
 				Name: paddingFieldPrefix + strconv.Itoa(fieldIndex),
-				Type: reflect.ArrayOf(int(paddingNeeded), reflect.TypeOf(byte(0))),
+				Type: reflect.ArrayOf(int(paddingNeeded), reflect.TypeFor[byte]()),
 			})
 			currentOffset += paddingNeeded
 			fieldIndex++
@@ -548,7 +546,7 @@ func bundleStackArgs(stackArgs []reflect.Value, addStack func(uintptr)) {
 
 	// Set values (skip padding fields)
 	argIndex := 0
-	for j := 0; j < structInstance.NumField(); j++ {
+	for j := range structInstance.NumField() {
 		fieldName := structType.Field(j).Name
 		if stdstrings.HasPrefix(fieldName, paddingFieldPrefix) {
 			continue
@@ -576,7 +574,7 @@ func bundleStackArgs(stackArgs []reflect.Value, addStack func(uintptr)) {
 //   - Darwin ARM64: byte-level packing on the stack
 func getCallbackStruct(inType reflect.Type, frame unsafe.Pointer, floatsN *int, intsN *int, stackSlot *int, stackByteOffset *uintptr) reflect.Value {
 	switch runtime.GOOS {
-	case "darwin", "freebsd", "linux", "netbsd":
+	case "android", "darwin", "freebsd", "ios", "linux", "netbsd":
 	default:
 		panic("purego: getCallbackStruct is not supported on " + runtime.GOOS)
 	}
@@ -623,8 +621,8 @@ func getCallbackStruct(inType reflect.Type, frame unsafe.Pointer, floatsN *int, 
 	}
 
 	// Pointer on stack (rare: all integer registers exhausted).
-	if runtime.GOOS == "darwin" {
-		ptrVal := callbackArgFromStack(frame, *stackSlot, stackByteOffset, reflect.TypeOf(uintptr(0)))
+	if isDarwin {
+		ptrVal := callbackArgFromStack(frame, *stackSlot, stackByteOffset, reflect.TypeFor[uintptr]())
 		ptr := uintptr(ptrVal.Uint())
 		return reflect.NewAt(inType, *(*unsafe.Pointer)(unsafe.Pointer(&ptr))).Elem()
 	}
@@ -640,9 +638,9 @@ func readHFAFromRegisters(inType reflect.Type, f *[callbackMaxFrame]uintptr, flo
 	size := inType.Size()
 
 	// Determine the element type
-	root := inType.Field(0).Type
+	root := abiField(inType, 0).Type
 	for root.Kind() == reflect.Struct {
-		root = root.Field(0).Type
+		root = abiField(root, 0).Type
 	}
 	isFloat32 := root.Kind() == reflect.Float32
 
@@ -704,7 +702,7 @@ func readHFAFromRegisters(inType reflect.Type, f *[callbackMaxFrame]uintptr, flo
 // callback frame. On Darwin ARM64, arguments are byte-packed on the stack.
 // On Linux ARM64, arguments are 8-byte aligned.
 func readStructFromStackArm64(inType reflect.Type, f *[callbackMaxFrame]uintptr, frame unsafe.Pointer, stackSlot *int, stackByteOffset *uintptr) reflect.Value {
-	if runtime.GOOS == "darwin" {
+	if isDarwin {
 		return callbackArgFromStack(frame, *stackSlot, stackByteOffset, inType)
 	}
 	// Linux ARM64: 8-byte aligned slots.

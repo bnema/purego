@@ -7,10 +7,15 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
+	"structs"
 	"sync"
 	"testing"
 	"unsafe"
@@ -21,7 +26,9 @@ import (
 
 func getSystemLibrary() (string, error) {
 	switch runtime.GOOS {
-	case "darwin":
+	case "android":
+		return "libc.so", nil
+	case "darwin", "ios":
 		return "/usr/lib/libSystem.B.dylib", nil
 	case "freebsd":
 		return "libc.so.7", nil
@@ -52,19 +59,21 @@ func TestRegisterFunc_ConcurrentPointerReturn(t *testing.T) {
 	purego.RegisterLibFunc(&free, libc, "free")
 
 	var wg sync.WaitGroup
-	for i := 0; i < runtime.NumCPU(); i++ {
+
+	for i := range runtime.NumCPU() {
 		wg.Add(1)
-		go func() {
+		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < 400_000; j++ {
+			for range 400_000 {
 				ptr := alloc(5)
 				if ptr == nil {
 					continue
 				}
 				free(ptr)
 			}
-		}()
+		}(i)
 	}
+
 	wg.Wait()
 }
 
@@ -172,14 +181,65 @@ func TestRegisterLibFunc_Bool(t *testing.T) {
 	}
 }
 
-func TestABI(t *testing.T) {
-	if runtime.GOOS == "windows" && runtime.GOARCH == "386" {
-		t.Skip("need a 32bit gcc to run this test") // TODO: find 32bit gcc for test
+func TestNewCallback_NotAFunction(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fn   any
+	}{
+		{"nil", nil},
+		{"int", 42},
+		{"string", "not a function"},
+		{"pointer", new(int)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("NewCallback did not panic")
+				}
+				const want = "purego: the type must be a function but was not"
+				if got := fmt.Sprint(r); got != want {
+					t.Fatalf("panic mismatch:\n  got:  %q\n  want: %q", got, want)
+				}
+			}()
+			purego.NewCallback(tc.fn)
+		})
 	}
+}
+
+func TestRegisterFunc_InvalidFunctionPointer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fptr any
+		want string
+	}{
+		{"nil", nil, "purego: fptr must be a non-nil function pointer"},
+		{"non_pointer", 42, "purego: fptr must be a non-nil function pointer"},
+		{"function_value", func() {}, "purego: fptr must be a non-nil function pointer"},
+		{"nil_function_pointer", (*func())(nil), "purego: fptr must be a non-nil function pointer"},
+		{"pointer_to_non_function", new(int), "purego: fptr must be a function pointer"},
+		{"pointer_to_function_pointer", new(*func()), "purego: fptr must be a function pointer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("RegisterFunc did not panic")
+				}
+				if got := fmt.Sprint(r); got != tc.want {
+					t.Fatalf("panic mismatch:\n  got:  %q\n  want: %q", got, tc.want)
+				}
+			}()
+			purego.RegisterFunc(tc.fptr, 1)
+		})
+	}
+}
+
+func TestABI(t *testing.T) {
 	libFileName := filepath.Join(t.TempDir(), "abitest.so")
 	t.Logf("Build %v", libFileName)
 
-	if err := buildSharedLib("CC", libFileName, filepath.Join("testdata", "abitest", "abi_test.c")); err != nil {
+	if err := buildSharedLib(t, "CC", libFileName, filepath.Join("testdata", "abitest", "abi_test.c")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -234,14 +294,29 @@ func TestABI(t *testing.T) {
 			t.Fatalf("%s: got %q, want %q", cName, res, want)
 		}
 	}
+	{
+		const cName = "return_func_ptr"
+		var fn func() func(a, b int32) int32
+		purego.RegisterLibFunc(&fn, lib, cName)
+		add := fn()
+		const expect = 5
+		if res := add(2, 3); res != expect {
+			t.Fatalf("%s: got %d, want %d", cName, res, expect)
+		}
+	}
+	{
+		const cName = "return_null_func_ptr"
+		var fn func() func(a, b int32) int32
+		purego.RegisterLibFunc(&fn, lib, cName)
+		if fn() != nil {
+			t.Fatalf("%s: got a non-nil func, want nil", cName)
+		}
+	}
 }
 
 func TestABI_ArgumentPassing(t *testing.T) {
-	if runtime.GOOS == "windows" && runtime.GOARCH == "386" {
-		t.Skip("need a 32bit gcc to run this test") // TODO: find 32bit gcc for test
-	}
 	libFileName := filepath.Join(t.TempDir(), "abitest.so")
-	if err := buildSharedLib("CC", libFileName, filepath.Join("testdata", "abitest", "abi_test.c")); err != nil {
+	if err := buildSharedLib(t, "CC", libFileName, filepath.Join("testdata", "abitest", "abi_test.c")); err != nil {
 		t.Fatal(err)
 	}
 	lib, err := load.OpenLibrary(libFileName)
@@ -373,11 +448,20 @@ func TestABI_ArgumentPassing(t *testing.T) {
 		},
 		{
 			name: "8int_hfa4_stack",
-			fn:   new(func(*byte, uintptr, int32, int32, int32, int32, int32, int32, int32, int32, struct{ x, y, z, w float32 })),
-			cFn:  "stack_8int_hfa4_stack",
+			fn: new(func(*byte, uintptr, int32, int32, int32, int32, int32, int32, int32, int32, struct {
+				_          structs.HostLayout
+				x, y, z, w float32
+			})),
+			cFn: "stack_8int_hfa4_stack",
 			call: func(f any) string {
 				buf := make([]byte, 256)
-				(*f.(*func(*byte, uintptr, int32, int32, int32, int32, int32, int32, int32, int32, struct{ x, y, z, w float32 })))(&buf[0], 256, 1, 2, 3, 4, 5, 6, 7, 8, struct{ x, y, z, w float32 }{10.0, 20.0, 30.0, 40.0})
+				(*f.(*func(*byte, uintptr, int32, int32, int32, int32, int32, int32, int32, int32, struct {
+					_          structs.HostLayout
+					x, y, z, w float32
+				})))(&buf[0], 256, 1, 2, 3, 4, 5, 6, 7, 8, struct {
+					_          structs.HostLayout
+					x, y, z, w float32
+				}{x: 10.0, y: 20.0, z: 30.0, w: 40.0})
 				return string(buf[:bytes.IndexByte(buf, 0)])
 			},
 			want: "1:2:3:4:5:6:7:8:10.0:20.0:30.0:40.0",
@@ -385,6 +469,7 @@ func TestABI_ArgumentPassing(t *testing.T) {
 		{
 			name: "8int_mixed_struct",
 			fn: new(func(*byte, uintptr, int32, int32, int32, int32, int32, int32, int32, int32, struct {
+				_ structs.HostLayout
 				a int32
 				b float32
 			})),
@@ -392,24 +477,108 @@ func TestABI_ArgumentPassing(t *testing.T) {
 			call: func(f any) string {
 				buf := make([]byte, 256)
 				(*f.(*func(*byte, uintptr, int32, int32, int32, int32, int32, int32, int32, int32, struct {
+					_ structs.HostLayout
 					a int32
 					b float32
 				})))(&buf[0], 256, 1, 2, 3, 4, 5, 6, 7, 8, struct {
+					_ structs.HostLayout
 					a int32
 					b float32
-				}{9, 10.0})
+				}{a: 9, b: 10.0})
 				return string(buf[:bytes.IndexByte(buf, 0)])
 			},
 			want: "1:2:3:4:5:6:7:8:9:10.0",
+		},
+		{
+			// check if unaligned 64bit argument and 64bit returned value is properly passed via registers
+			// arm-specific but must work everywhere
+			name: "arm_int64_unaligned_in_registers",
+			fn:   new(func(uintptr, int64) int64),
+			cFn:  "arm_int64_unaligned_in_registers",
+			call: func(f any) string {
+				fn := *(f).(*func(x uintptr, y int64) int64)
+				return strconv.FormatInt(fn(456, math.MaxInt32+1500), 10)
+			},
+			want: strconv.FormatInt(456*123+math.MaxInt32+1500, 10),
+		},
+		{
+			// check if unaligned 64bit argument and 64bit returned value is properly passed via stack
+			// arm-specific but must work everywhere
+			name: "arm_int64_unaligned_on_stack",
+			fn:   new(func(uintptr, uintptr, uintptr, uintptr, uintptr, int64) int64),
+			cFn:  "arm_int64_unaligned_on_stack",
+			call: func(f any) string {
+				fn := *(f).(*func(a1, a2, a3, a4, a5 uintptr, a6 int64) int64)
+				return strconv.FormatInt(fn(12, 34, 56, 78, 90, math.MaxInt32+1500), 10)
+			},
+			want: strconv.FormatInt(12*1+34*2+56*3+78*4+90*5+math.MaxInt32+1500, 10),
+		},
+		{
+			// check if unaligned 64bit argument and 64bit returned value is properly passed via stack when it's occupied by floats
+			// arm-specific but must work everywhere
+			name: "arm_int64_unaligned_on_stack_after_floats",
+			fn: new(func(
+				uintptr, uintptr, uintptr, uintptr,
+				float32, float32, float32, float32,
+				float32, float32, float32, float32,
+				float32, float32, float32, float32,
+				float32, float32, float32, float32,
+				float32, int64,
+			) int64),
+			cFn: "arm_int64_unaligned_on_stack_after_floats",
+			call: func(f any) string {
+				fn := *(f).(*func(
+					a1, a2, a3, a4 uintptr,
+					f1, f2, f3, f4 float32,
+					f5, f6, f7, f8 float32,
+					f9, f10, f11, f12 float32,
+					f13, f14, f15, f16 float32,
+					f17 float32, a5 int64,
+				) int64)
+				return strconv.FormatInt(fn(
+					12, 34, 56, 78,
+					0, 0, 0, 0,
+					0, 0, 0, 0,
+					0, 0, 0, 0,
+					0, 0, 0, 0,
+					0, math.MaxInt32+1500,
+				), 10)
+			},
+			want: strconv.FormatInt(12*1+34*2+56*3+78*4+math.MaxInt32+1500, 10),
+		},
+		{
+			// check if unaligned float 64bit argument and float 64bit returned value is properly passed via registers
+			// arm-softfloat-specific but must work everywhere
+			name: "arm_float64_unaligned_in_registers",
+			fn:   new(func(uintptr, float64) float64),
+			cFn:  "arm_float64_unaligned_in_registers",
+			call: func(f any) string {
+				fn := *(f).(*func(x uintptr, y float64) float64)
+				return strconv.FormatFloat(fn(456, math.MaxFloat32+1500), 'b', 10, 64)
+			},
+			want: strconv.FormatFloat(456*123.5+math.MaxFloat32+1500, 'b', 10, 64),
+		},
+		{
+			// check if unaligned float 64bit argument and float 64bit returned value is properly passed via stack
+			// arm-softfloat-specific but must work everywhere
+			name: "arm_float64_unaligned_on_stack",
+			fn:   new(func(uintptr, uintptr, uintptr, uintptr, uintptr, float64) float64),
+			cFn:  "arm_float64_unaligned_on_stack",
+			call: func(f any) string {
+				fn := *(f).(*func(a1, a2, a3, a4, a5 uintptr, a6 float64) float64)
+				return strconv.FormatFloat(fn(12, 34, 56, 78, 90, math.MaxFloat32+1500), 'b', 10, 64)
+			},
+			want: strconv.FormatFloat(12*1+34*2+56*3+78*4+90*5+math.MaxFloat32+1500, 'b', 10, 64),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.name == "20_int32" && (runtime.GOOS != "darwin" || runtime.GOARCH != "arm64") {
-				t.Skip("20 int32 arguments only supported on Darwin ARM64 with smart stack checking")
+			if tt.name == "20_int32" && runtime.GOARCH == "ppc64le" {
+				t.Skip("ppc64le retains the 15-argument limit")
 			}
-			if tt.name == "10_float32" && (runtime.GOARCH == "loong64" || runtime.GOARCH == "ppc64le" || runtime.GOARCH == "riscv64" || runtime.GOARCH == "s390x") {
+			if (tt.name == "10_float32" || tt.name == "arm_int64_unaligned_on_stack_after_floats") &&
+				(runtime.GOARCH == "loong64" || runtime.GOARCH == "ppc64le" || runtime.GOARCH == "riscv64" || runtime.GOARCH == "s390x") {
 				t.Skip("float32 stack arguments not yet supported on this platform")
 			}
 			// Struct tests require Darwin ARM64 or AMD64
@@ -427,43 +596,241 @@ func TestABI_ArgumentPassing(t *testing.T) {
 			}
 		})
 	}
-}
 
-func TestABI_TooManyArguments(t *testing.T) {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		t.Skip("This test is specific to Darwin ARM64")
-	}
-
-	libFileName := filepath.Join(t.TempDir(), "abitest.so")
-	if err := buildSharedLib("CC", libFileName, filepath.Join("testdata", "abitest", "abi_test.c")); err != nil {
-		t.Fatal(err)
-	}
-	lib, err := load.OpenLibrary(libFileName)
-	if err != nil {
-		t.Fatalf("Failed to open library %q: %v", libFileName, err)
-	}
-	t.Cleanup(func() {
-		if err := load.CloseLibrary(lib); err != nil {
-			t.Errorf("Failed to close library: %v", err)
+	t.Run("20_uintptr", func(t *testing.T) {
+		if runtime.GOARCH == "ppc64le" {
+			t.Skip("ppc64le retains the 15-argument limit")
+		}
+		var fn func(uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr) uintptr
+		purego.RegisterLibFunc(&fn, lib, "stack_20_uintptr")
+		got := fn(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)
+		const want = uintptr(210)
+		if got != want {
+			t.Fatalf("stack_20_uintptr: got %d, want %d", got, want)
 		}
 	})
 
-	// Test that 35 int64 arguments (27 slots needed) exceeds the limit
-	t.Run("35_int64_exceeds_limit", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Logf("Got expected panic: %v", r)
-			} else {
-				t.Errorf("Expected panic but didn't get one")
-			}
-		}()
+	t.Run("32_uintptr", func(t *testing.T) {
+		if runtime.GOARCH == "ppc64le" {
+			t.Skip("ppc64le retains the 15-argument limit")
+		}
+		var fn func(
+			uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr,
+			uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr,
+			uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr,
+			uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr,
+		) uintptr
+		purego.RegisterLibFunc(&fn, lib, "stack_32_uintptr")
+		got := fn(
+			1, 2, 3, 4, 5, 6, 7, 8,
+			9, 10, 11, 12, 13, 14, 15, 16,
+			17, 18, 19, 20, 21, 22, 23, 24,
+			25, 26, 27, 28, 29, 30, 31, 32,
+		)
+		const want = uintptr(528)
+		if got != want {
+			t.Fatalf("stack_32_uintptr: got %d, want %d", got, want)
+		}
+	})
 
-		var fn func(*byte, uintptr, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64, int64)
-		purego.RegisterLibFunc(&fn, lib, "stack_35_int64_exceeds")
+	t.Run("syscalln_20_uintptr", func(t *testing.T) {
+		if runtime.GOARCH == "ppc64le" {
+			t.Skip("ppc64le retains the 15-argument limit")
+		}
+		fn, err := load.OpenSymbol(lib, "stack_20_uintptr")
+		if err != nil {
+			t.Fatalf("OpenSymbol(stack_20_uintptr) failed: %v", err)
+		}
+		got, _, _ := purego.SyscallN(fn,
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+			11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+		)
+		const want = uintptr(210)
+		if got != want {
+			t.Fatalf("stack_20_uintptr SyscallN: got %d, want %d", got, want)
+		}
+	})
+
+	t.Run("syscalln_32_uintptr", func(t *testing.T) {
+		if runtime.GOARCH == "ppc64le" {
+			t.Skip("ppc64le retains the 15-argument limit")
+		}
+		fn, err := load.OpenSymbol(lib, "stack_32_uintptr")
+		if err != nil {
+			t.Fatalf("OpenSymbol(stack_32_uintptr) failed: %v", err)
+		}
+		got, _, _ := purego.SyscallN(fn,
+			1, 2, 3, 4, 5, 6, 7, 8,
+			9, 10, 11, 12, 13, 14, 15, 16,
+			17, 18, 19, 20, 21, 22, 23, 24,
+			25, 26, 27, 28, 29, 30, 31, 32,
+		)
+		const want = uintptr(528)
+		if got != want {
+			t.Fatalf("stack_32_uintptr SyscallN: got %d, want %d", got, want)
+		}
+	})
+
+	t.Run("32_mixed_int_float", func(t *testing.T) {
+		if unsafe.Sizeof(uintptr(0)) == 4 {
+			t.Skip("requires 64-bit uintptr slots")
+		}
+		if runtime.GOARCH == "ppc64le" {
+			t.Skip("mixed int/float stack arguments are not yet supported on ppc64le")
+		}
+
+		var fn func(
+			uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr,
+			uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr, uintptr,
+			float64, float64, float64, float64, float64, float64, float64, float64,
+			float64, float64, float64, float64, float64, float64, float64, float64,
+		) float64
+		purego.RegisterLibFunc(&fn, lib, "stack_32_mixed_int_float")
+		got := fn(
+			1, 2, 3, 4, 5, 6, 7, 8,
+			9, 10, 11, 12, 13, 14, 15, 16,
+			1, 2, 3, 4, 5, 6, 7, 8,
+			9, 10, 11, 12, 13, 14, 15, 16,
+		)
+		const want = 5168.0
+		if got != want {
+			t.Fatalf("stack_32_mixed_int_float: got %f, want %f", got, want)
+		}
 	})
 }
 
-func buildSharedLib(compilerEnv, libFile string, sources ...string) error {
+func TestABI_TooManyArguments(t *testing.T) {
+	mustPanic := func(t *testing.T, want string, f func()) {
+		t.Helper()
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatalf("expected panic %q, got none", want)
+			}
+			got := fmt.Sprint(r)
+			if got != want {
+				t.Fatalf("panic mismatch:\n  got:  %q\n  want: %q", got, want)
+			}
+		}()
+		f()
+	}
+
+	// 33 int64 parameters exceeds maxArgs=32.
+	t.Run("registerfunc_33_int64_exceeds_limit", func(t *testing.T) {
+		mustPanic(t, "purego: too many stack arguments", func() {
+			var fn func(
+				int64, int64, int64, int64, int64, int64, int64, int64,
+				int64, int64, int64, int64, int64, int64, int64, int64,
+				int64, int64, int64, int64, int64, int64, int64, int64,
+				int64, int64, int64, int64, int64, int64, int64, int64,
+				int64,
+			)
+			purego.RegisterFunc(&fn, 1)
+		})
+	})
+
+	t.Run("registerfunc_16_int64_exceeds_ppc64le_limit", func(t *testing.T) {
+		if runtime.GOARCH != "ppc64le" {
+			t.Skip("ppc64le retains the 15-argument limit")
+		}
+		mustPanic(t, "purego: too many stack arguments", func() {
+			var fn func(
+				int64, int64, int64, int64, int64, int64, int64, int64,
+				int64, int64, int64, int64, int64, int64, int64, int64,
+			)
+			purego.RegisterFunc(&fn, 1)
+		})
+	})
+
+	t.Run("syscalln_33_uintptr_exceeds_limit", func(t *testing.T) {
+		mustPanic(t, "purego: too many arguments to SyscallN", func() {
+			purego.SyscallN(1,
+				1, 2, 3, 4, 5, 6, 7, 8,
+				9, 10, 11, 12, 13, 14, 15, 16,
+				17, 18, 19, 20, 21, 22, 23, 24,
+				25, 26, 27, 28, 29, 30, 31, 32,
+				33,
+			)
+		})
+	})
+
+	t.Run("syscalln_16_uintptr_exceeds_ppc64le_limit", func(t *testing.T) {
+		if runtime.GOARCH != "ppc64le" {
+			t.Skip("ppc64le retains the 15-argument limit")
+		}
+		mustPanic(t, "purego: too many arguments to SyscallN", func() {
+			purego.SyscallN(1,
+				1, 2, 3, 4, 5, 6, 7, 8,
+				9, 10, 11, 12, 13, 14, 15, 16,
+			)
+		})
+	})
+}
+
+func TestABI_StructReturnHiddenPointer(t *testing.T) {
+	// A struct returned in memory is passed a hidden pointer as the first
+	// integer argument, so maxArgs integer arguments plus it need one more slot
+	// than sysargs holds and RegisterFunc must reject the registration.
+	type bigStruct struct{ A, B, C uint64 } // larger than two eightbytes
+
+	if !purego.StructReturnInMemory(reflect.TypeFor[bigStruct]()) {
+		t.Skipf("GOARCH=%s does not return large structs via a hidden integer argument", runtime.GOARCH)
+	}
+
+	in := make([]reflect.Type, purego.MaxArgs)
+	for i := range in {
+		in[i] = reflect.TypeFor[uintptr]()
+	}
+	fnType := reflect.FuncOf(in, []reflect.Type{reflect.TypeFor[bigStruct]()}, false)
+	fptr := reflect.New(fnType)
+
+	defer func() {
+		switch r := recover(); {
+		case r == nil:
+			t.Fatal("RegisterFunc accepted the call; the hidden struct-return pointer was not counted against the stack limit")
+		case strings.Contains(fmt.Sprint(r), "too many stack arguments"):
+			// Expected: the guard fired.
+		case strings.Contains(fmt.Sprint(r), "only supported on"):
+			t.Skipf("struct returns are unsupported on this platform: %v", r)
+		default:
+			t.Fatalf("unexpected panic: %v", r)
+		}
+	}()
+
+	// A non-zero cfn passes the nil check; the panic fires during the preflight
+	// argument count, before the function is ever called.
+	purego.RegisterFunc(fptr.Interface(), uintptr(1))
+}
+
+func buildSharedLib(tb testing.TB, compilerEnv, libFile string, sources ...string) error {
+	tb.Helper()
+	// When PUREGO_TEST_PREBUILT_LIBDIR is set, the shared library has been
+	// cross-compiled ahead of time and placed in that directory under the
+	// base name of libFile. This allows running the tests on a target that
+	// has no C toolchain, such as an Android emulator.
+	if dir := os.Getenv("PUREGO_TEST_PREBUILT_LIBDIR"); dir != "" {
+		data, err := os.ReadFile(filepath.Join(dir, filepath.Base(libFile)))
+		if err != nil {
+			return fmt.Errorf("prebuilt lib: %w", err)
+		}
+		if err := os.WriteFile(libFile, data, 0o755); err != nil {
+			return fmt.Errorf("prebuilt lib: %w", err)
+		}
+		return nil
+	}
+
+	// Compiling the library needs a C toolchain targeting GOARCH. CI has none
+	// for Windows on 386 or arm64, so skip those (the prebuilt path above
+	// avoids the toolchain).
+	if runtime.GOOS == "windows" {
+		switch runtime.GOARCH {
+		case "386":
+			tb.Skip("need a 386 C toolchain to run this test") // TODO: find a 386 C toolchain for test
+		case "arm64":
+			tb.Skip("need an arm64 C toolchain to run this test")
+		}
+	}
+
 	out, err := exec.Command("go", "env", compilerEnv).Output()
 	if err != nil {
 		return fmt.Errorf("go env %s error: %w", compilerEnv, err)

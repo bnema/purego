@@ -5,7 +5,6 @@ package purego
 
 import (
 	"reflect"
-	"runtime"
 	"unsafe"
 )
 
@@ -17,10 +16,8 @@ func addStruct(v reflect.Value, numInts, numFloats, numStack *int, addInt, addFl
 
 	// TODO: ARM EABI: small structs are passed in registers or on stack
 	// For simplicity, pass by pointer for now
-	ptr, live := stableValuePointer(v)
-	if live != nil {
-		keepAlive = append(keepAlive, live)
-	}
+	ptr := v.Addr().UnsafePointer()
+	keepAlive = append(keepAlive, ptr)
 	if *numInts < 4 {
 		addInt(uintptr(ptr))
 		*numInts++
@@ -28,11 +25,17 @@ func addStruct(v reflect.Value, numInts, numFloats, numStack *int, addInt, addFl
 		addStack(uintptr(ptr))
 		*numStack++
 	}
-	runtime.KeepAlive(live)
 	return keepAlive
 }
 
-func getStruct(outType reflect.Type, syscall syscall15Args) (v reflect.Value) {
+// structReturnInMemory always reports false on arm: an indirect struct return
+// is recovered from the pointer the callee leaves in a1 (see getStruct) rather
+// than through a caller-allocated hidden first argument.
+func structReturnInMemory(reflect.Type) bool {
+	return false
+}
+
+func getStruct(outType reflect.Type, syscall syscallArgs) (v reflect.Value) {
 	outSize := outType.Size()
 	if outSize == 0 {
 		return reflect.New(outType).Elem()
@@ -56,14 +59,13 @@ func placeRegisters(v reflect.Value, addFloat func(uintptr), addInt func(uintptr
 	if size == 0 {
 		return
 	}
-	ptr, live := stableValuePointer(v)
+	ptr := unsafe.Pointer(v.UnsafeAddr())
 	if size <= 4 {
 		addInt(*(*uintptr)(ptr))
 	} else if size <= 8 {
 		addInt(*(*uintptr)(ptr))
 		addInt(*(*uintptr)(unsafe.Add(ptr, 4)))
 	}
-	runtime.KeepAlive(live)
 }
 
 // shouldBundleStackArgs always returns false on arm

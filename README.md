@@ -3,8 +3,6 @@
 
 A library for calling C functions from Go without Cgo.
 
-> Fork notice: this repository is a maintained fork of `github.com/ebitengine/purego` with additional ABI, callback, and generator-facing fixes needed by the PureGoTK stack.
-
 > This is beta software so expect bugs and potentially API breaking changes
 > but each release will be tagged to avoid breaking people's code.
 > Bug reports are encouraged.
@@ -36,24 +34,27 @@ Tier 1 platforms are the primary targets officially supported by PureGo. When a 
 - **iOS**: amd64<sup>1</sup>, arm64<sup>1</sup>
 - **Linux**: amd64, arm64
 - **macOS**: amd64, arm64
-- **Windows**: amd64, arm64
+- **Windows**: amd64<sup>2</sup>, arm64<sup>2</sup>
 
 ### Tier 2
 
 Tier 2 platforms are supported by PureGo on a best-effort basis. Critical bugs on Tier 2 platforms do not block new PureGo releases. However, fixes contributed by external contributors are very welcome and encouraged.
 
-- **Android**: 386<sup>1</sup>, arm<sup>1</sup>
-- **FreeBSD**: amd64<sup>2</sup>, arm64<sup>2</sup>
-- **Linux**: 386, arm, loong64, ppc64le, riscv64, s390x<sup>1</sup>
-- **NetBSD**: amd64<sup>2</sup>, arm64<sup>2</sup>
-- **Windows**: 386<sup>3</sup>, arm<sup>3,4</sup>
+- **Android**: 386<sup>1,3</sup>, arm<sup>1,3</sup>
+- **FreeBSD**: amd64<sup>3,4</sup>, arm64<sup>3,4</sup>
+- **Linux**: 386<sup>3</sup>, arm<sup>3</sup>, loong64<sup>2</sup>, ppc64le<sup>2</sup>, riscv64<sup>3</sup>, s390x<sup>3, 5</sup>
+- **NetBSD**: amd64<sup>3,4</sup>, arm64<sup>3,4</sup>
+- **Windows**: 386<sup>3,6</sup>, arm<sup>3,6,7</sup>
 
 #### Support Notes
 
 1. These architectures require CGO_ENABLED=1 to compile
-2. These architectures require the special flag `-gcflags="github.com/bnema/purego/internal/fakecgo=-std"` to compile with CGO_ENABLED=0
-3. These architectures only support `SyscallN` and `NewCallback`
-4. These architectures are no longer supported as of Go 1.26
+2. These architectures support passing structs by value as arguments and return values when calling C functions, but not in callbacks created with `NewCallback`
+3. These architectures do not support passing structs by value as arguments or return values
+4. These architectures require the special flag `-gcflags="github.com/bnema/purego/internal/fakecgo=-std"` to compile with CGO_ENABLED=0
+5. These architectures require CGO_ENABLED=1 to compile in versions before Go 1.27, but will be supported without Cgo in Go 1.27 and later
+6. These architectures only support `SyscallN` and `NewCallback`
+7. These architectures are no longer supported as of Go 1.26
 
 ## Example
 
@@ -101,21 +102,9 @@ exhaustion on Unix-like platforms, set `PUREGO_CALLBACK_LEDGER=1` to append JSON
 callback lifecycle events to `/tmp/purego-callback-ledger-<pid>.jsonl`, or set
 `PUREGO_CALLBACK_LEDGER_FILE=/path/to/file.jsonl` to choose the output file. Stack
 capture is also disabled by default; set `PUREGO_CALLBACK_LEDGER_STACK=1` when call
-site attribution is needed. Stack capture adds per-callback overhead and should be
-reserved for active debugging sessions. For ad-hoc stderr/file traces near callback
-exhaustion, set `PUREGO_CALLBACK_TRACE=1`; `PUREGO_CALLBACK_TRACE_FILE` overrides
-the default `/tmp/purego-callback-trace-<pid>.log` path.
-
-Diagnostic files are created with `0o600` permissions. They are append-only and
-unbounded, so long-running processes can exhaust disk space if diagnostics stay
-enabled. A ledger line is a JSON object such as:
-
-```json
-{"time":"2026-06-09T14:03:00Z","pid":1234,"seq":42,"event":"alloc","index":7,"addr":"0x1234","stack":"..."}
-```
-
-Use `time` as the timestamp, `index` as the callback ID, and the `pid`, `seq`,
-`event`, `addr`, and optional `stack` fields when parsing the ledger output.
+site attribution is needed. For ad-hoc stderr/file traces near callback exhaustion,
+set `PUREGO_CALLBACK_TRACE=1`; `PUREGO_CALLBACK_TRACE_FILE` overrides the default
+`/tmp/purego-callback-trace-<pid>.log` path.
 
 ## Questions
 
@@ -130,7 +119,6 @@ This is a list of the copied files:
 
 * `abi_*.h` from package `runtime/cgo`
 * `wincallback.go` from package `runtime`
-* `zcallback_darwin_*.s` from package `runtime`
 * `internal/fakecgo/abi_*.h` from package `runtime/cgo`
 * `internal/fakecgo/asm_GOARCH.s` from package `runtime/cgo`
 * `internal/fakecgo/callbacks.go` from package `runtime/cgo`

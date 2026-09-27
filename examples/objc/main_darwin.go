@@ -18,7 +18,7 @@ var (
 )
 
 func BarInit(id objc.ID, cmd objc.SEL) objc.ID {
-	return id.SendSuper(cmd)
+	return id.SendSuper2(objc.GetClass("BarObject"), cmd)
 }
 
 func main() {
@@ -36,7 +36,7 @@ func main() {
 		[]objc.FieldDef{
 			{
 				Name:      "bar",
-				Type:      reflect.TypeOf(int(0)),
+				Type:      reflect.TypeFor[int](),
 				Attribute: objc.ReadWrite,
 			},
 		},
