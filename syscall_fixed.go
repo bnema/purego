@@ -10,10 +10,6 @@ import (
 	"unsafe"
 )
 
-//go:noescape
-//go:linkname noescapeFixed runtime.noescape
-func noescapeFixed(p unsafe.Pointer) unsafe.Pointer
-
 // Syscall15 calls fn with up to 15 integer-class arguments without
 // allocating. Unused arguments must be 0. Unlike SyscallN it does not use a
 // variadic argument slice. Like SyscallN, a uintptr converted from an
@@ -30,14 +26,18 @@ func Syscall15(fn, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, 
 	if runtime.GOOS == "windows" {
 		return syscall_syscallN(fn, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15)
 	}
-	s := syscallArgs{
+	// Must not live on the goroutine stack: a Go callback made by fn can move
+	// that stack, and syscallX would store results through the stale address.
+	s := thePool.Get().(*syscallArgs)
+	*s = syscallArgs{
 		fn: fn, a1: a1, a2: a2, a3: a3, a4: a4, a5: a5,
 		a6: a6, a7: a7, a8: a8, a9: a9, a10: a10,
 		a11: a11, a12: a12, a13: a13, a14: a14, a15: a15,
 	}
-	// cgocall is synchronous: s remains on this goroutine's stack until it returns.
-	runtime_cgocall(syscallXABI0, noescapeFixed(unsafe.Pointer(&s)))
-	return s.a1, s.a2, s.a3
+	runtime_cgocall(syscallXABI0, unsafe.Pointer(s))
+	r1, r2, err = s.a1, s.a2, s.a3
+	thePool.Put(s)
+	return r1, r2, err
 }
 
 // Syscall6 is Syscall15 with six arguments. Like Syscall15, pointer-derived
