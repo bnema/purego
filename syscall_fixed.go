@@ -10,8 +10,8 @@ import (
 	"unsafe"
 )
 
-// Syscall15 calls fn with up to 15 integer-class arguments without
-// allocating. Unused arguments must be 0. Unlike SyscallN it does not use a
+// Syscall15 calls fn with up to 15 integer-class arguments. It does not
+// allocate per call once its argument pool is warm. Unused arguments must be 0. Unlike SyscallN it does not use a
 // variadic argument slice. Like SyscallN, a uintptr converted from an
 // unsafe.Pointer in the call expression keeps its object alive and un-moved
 // for the duration of the call (go:uintptrescapes); the object escapes to
