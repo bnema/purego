@@ -491,6 +491,7 @@ var callbackasmABI0 = uintptr(unsafe.Pointer(&__callbackasm))
 var callbackWrap_call = callbackWrap
 
 // noescape is runtime.noescape; the synchronous callee must not retain p.
+//
 //go:noescape
 //go:linkname noescape runtime.noescape
 func noescape(p unsafe.Pointer) unsafe.Pointer
